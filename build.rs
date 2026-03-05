@@ -1,3 +1,5 @@
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -23,13 +25,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    let out_file = out_dir.join("agent-browser-bin");
+    let out_file = out_dir.join("agent-browser-bin.gz");
 
     if !out_file.exists() {
         let response = reqwest::blocking::get(download_url)?.error_for_status()?;
         let bytes = response.bytes()?;
-        let mut file = fs::File::create(&out_file)?;
-        file.write_all(&bytes)?;
+        let file = fs::File::create(&out_file)?;
+        let mut encoder = GzEncoder::new(file, Compression::best());
+        encoder.write_all(&bytes)?;
+        encoder.finish()?;
     }
 
     Ok(())
