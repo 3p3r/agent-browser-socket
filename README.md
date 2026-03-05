@@ -58,6 +58,28 @@ cargo run
 
 The server listens on `host:port` from config.
 
+## Test
+
+```bash
+cargo test --test e2e -- --nocapture
+```
+
+The E2E suite uses the official Node `socket.io-client` and will auto-run `npm install --silent` on first run.
+
+## Coverage
+
+Install once:
+
+```bash
+cargo install cargo-tarpaulin
+```
+
+Run coverage:
+
+```bash
+cargo coverage
+```
+
 CLI version:
 
 ```bash

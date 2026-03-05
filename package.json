@@ -1,0 +1,10 @@
+{
+  "name": "agent-browser-socket-e2e",
+  "private": true,
+  "version": "1.0.0",
+  "description": "E2E socket.io client helper for Rust integration tests",
+  "type": "module",
+  "dependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}

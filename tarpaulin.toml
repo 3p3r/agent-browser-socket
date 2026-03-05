@@ -1,0 +1,6 @@
+[default]
+out = ["Html", "Lcov"]
+output-dir = "coverage"
+run-types = ["Tests"]
+timeout = "120s"
+exclude-files = ["build.rs"]

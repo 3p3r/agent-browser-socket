@@ -17,6 +17,7 @@ dependencies = [
  "dirs",
  "flate2",
  "indexmap",
+ "once_cell",
  "reqwest",
  "secure-string",
  "serde",
