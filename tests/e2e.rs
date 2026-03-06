@@ -1,5 +1,7 @@
 #[path = "../src/auth.rs"]
 mod auth;
+#[path = "../src/screenshot.rs"]
+mod screenshot;
 #[path = "../src/server.rs"]
 mod server;
 
@@ -345,4 +347,65 @@ async fn socket_command_auth_500_maps_to_error_500() {
         .find(|entry| entry.get("event") == Some(&json!("error")))
         .expect("error event missing");
     assert_eq!(error["data"]["status"], 500);
+}
+
+#[tokio::test]
+async fn socket_screenshot_auth_401_emits_error() {
+    let (auth_server, _) = start_auth_server(StatusCode::UNAUTHORIZED).await;
+    let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
+    let events = run_socket_client(&server.base_url, "screenshot", json!({})).await;
+    server.stop().await;
+    auth_server.stop().await;
+
+    let error = events
+        .iter()
+        .find(|entry| entry.get("event") == Some(&json!("error")))
+        .expect("error event missing");
+    assert_eq!(error["data"]["status"], 401);
+}
+
+#[tokio::test]
+async fn socket_screenshot_auth_200_forwards_headers_and_responds() {
+    let (auth_server, seen_headers) = start_auth_server(StatusCode::OK).await;
+    let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
+    let events = run_socket_client(
+        &server.base_url,
+        "screenshot",
+        json!({
+            "authorization": "Bearer screenshot-token",
+            "cookie": "sid=screenshot"
+        }),
+    )
+    .await;
+    server.stop().await;
+    auth_server.stop().await;
+
+    let captured = seen_headers.lock().expect("lock headers");
+    assert!(!captured.is_empty(), "auth endpoint should be called");
+
+    let headers = &captured[0];
+    assert_eq!(
+        headers.get("authorization").and_then(|v| v.to_str().ok()),
+        Some("Bearer screenshot-token")
+    );
+    assert_eq!(
+        headers.get("cookie").and_then(|v| v.to_str().ok()),
+        Some("sid=screenshot")
+    );
+
+    let screenshot_event = events
+        .iter()
+        .find(|entry| entry.get("event") == Some(&json!("screenshot")));
+    let error_event = events
+        .iter()
+        .find(|entry| entry.get("event") == Some(&json!("error")));
+
+    assert!(
+        screenshot_event.is_some() || error_event.is_some(),
+        "expected screenshot or error event"
+    );
+
+    if let Some(error) = error_event {
+        assert_eq!(error["data"]["status"], 500);
+    }
 }

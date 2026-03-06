@@ -1,5 +1,6 @@
 use crate::configuration::{load_config, AppConfig};
 use crate::embedded_binary::resolve_binary_path;
+use crate::screenshot::capture_screenshot;
 use crate::server::{build_router, AppState};
 use std::error::Error;
 use std::ffi::OsString;
@@ -13,6 +14,7 @@ use tokio::process::Command;
 pub enum CliMode {
     Serve,
     Version,
+    Screenshot,
     Command(Vec<OsString>),
 }
 
@@ -26,6 +28,14 @@ pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
     let show_version = args
         .iter()
         .any(|arg| matches!(arg.to_string_lossy().as_ref(), "version" | "--version" | "-V"));
+
+    let take_screenshot = args
+        .iter()
+        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--screenshot"));
+
+    if take_screenshot {
+        return CliMode::Screenshot;
+    }
 
     if show_version {
         CliMode::Version
@@ -49,6 +59,11 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
         }
         CliMode::Version => {
             println!("agent-browser-socket {}", env!("CARGO_PKG_VERSION"));
+            Ok(0)
+        }
+        CliMode::Screenshot => {
+            let screenshot = capture_screenshot()?;
+            println!("{}", serde_json::to_string(&screenshot)?);
             Ok(0)
         }
         CliMode::Serve => {
@@ -199,6 +214,7 @@ mod tests {
         assert_eq!(parse_cli_mode(&[OsString::from("--version")]), CliMode::Version);
         assert_eq!(parse_cli_mode(&[OsString::from("-V")]), CliMode::Version);
         assert_eq!(parse_cli_mode(&[OsString::from("version")]), CliMode::Version);
+        assert_eq!(parse_cli_mode(&[OsString::from("--screenshot")]), CliMode::Screenshot);
         assert_eq!(parse_cli_mode(&[OsString::from("serve")]), CliMode::Serve);
     }
 

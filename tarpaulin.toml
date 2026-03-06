@@ -3,4 +3,5 @@ out = ["Html", "Lcov"]
 output-dir = "coverage"
 run-types = ["Tests"]
 timeout = "120s"
-exclude-files = ["build.rs"]
+include-files = ["src/*"]
+exclude-files = ["build.rs", "tests/*"]

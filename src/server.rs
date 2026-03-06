@@ -1,4 +1,5 @@
 use crate::auth::check_auth;
+use crate::screenshot::{capture_screenshot, ScreenshotResult};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -27,16 +28,55 @@ pub struct CommandPayload {
     pub cookie: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ScreenshotPayload {
+    pub authorization: Option<String>,
+    pub cookie: Option<String>,
+}
+
+fn screenshot_response(
+    screenshot_result: std::thread::Result<Result<ScreenshotResult, Box<dyn std::error::Error>>>,
+) -> (&'static str, serde_json::Value) {
+    match screenshot_result {
+        Ok(Ok(screenshot)) => (
+            "screenshot",
+            json!({
+                "width": screenshot.width,
+                "height": screenshot.height,
+                "monitor": screenshot.monitor,
+                "png_base64": screenshot.png_base64
+            }),
+        ),
+        Ok(Err(error)) => (
+            "error",
+            json!({
+                "status": 500,
+                "message": format!("screenshot failed: {error}")
+            }),
+        ),
+        Err(_) => (
+            "error",
+            json!({
+                "status": 500,
+                "message": "screenshot failed: panic in capture backend"
+            }),
+        ),
+    }
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let (layer, io) = SocketIo::new_layer();
 
     io.ns("/", move |socket: SocketRef| {
         let state = state.clone();
         async move {
+            let screenshot_state = state.clone();
+            let command_state = state.clone();
+
             socket.on("health", |socket: SocketRef| async move {
                 let _ = socket.emit(
                     "health",
-                    json!({
+                    &json!({
                         "status": "ok"
                     }),
                 );
@@ -45,14 +85,45 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             socket.on("version", |socket: SocketRef| async move {
                 let _ = socket.emit(
                     "version",
-                    json!({
+                    &json!({
                         "version": env!("CARGO_PKG_VERSION")
                     }),
                 );
             });
 
+            socket.on(
+                "screenshot",
+                move |socket: SocketRef, Data(payload): Data<ScreenshotPayload>| {
+                    let state = screenshot_state.clone();
+                    async move {
+                        if let Err(code) = check_auth(
+                            &state.http_client,
+                            state.auth_url.as_deref(),
+                            payload.authorization.as_deref(),
+                            payload.cookie.as_deref(),
+                        )
+                        .await
+                        {
+                            let _ = socket.emit(
+                                "error",
+                                &json!({
+                                    "status": code.as_u16(),
+                                    "message": "authorization denied"
+                                }),
+                            );
+                            return;
+                        }
+
+                        let screenshot_result = std::panic::catch_unwind(capture_screenshot);
+
+                        let (event, payload) = screenshot_response(screenshot_result);
+                        let _ = socket.emit(event, &payload);
+                    }
+                },
+            );
+
             socket.on("command", move |socket: SocketRef, Data(payload): Data<CommandPayload>| {
-                let state = state.clone();
+                let state = command_state.clone();
                 async move {
                     if let Err(code) = check_auth(
                         &state.http_client,
@@ -64,7 +135,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                     {
                         let _ = socket.emit(
                             "error",
-                            json!({
+                            &json!({
                                 "status": code.as_u16(),
                                 "message": "authorization denied"
                             }),
@@ -77,7 +148,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                         Err(message) => {
                             let _ = socket.emit(
                                 "error",
-                                json!({
+                                &json!({
                                     "status": 400,
                                     "message": message
                                 }),
@@ -103,7 +174,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                         Err(error) => {
                             let _ = socket.emit(
                                 "error",
-                                json!({
+                                &json!({
                                     "status": 500,
                                     "message": format!("failed to spawn process: {error}")
                                 }),
@@ -135,7 +206,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                                     Err(error) => {
                                         let _ = socket.emit(
                                             "error",
-                                            json!({
+                                            &json!({
                                                 "status": 500,
                                                 "message": format!("process wait failed: {error}")
                                             }),
@@ -147,7 +218,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                             line = async { stdout_lines.as_mut().unwrap().next_line().await }, if stdout_lines.is_some() => {
                                 match line {
                                     Ok(Some(line)) => {
-                                        let _ = socket.emit("stdout", json!({ "line": line }));
+                                        let _ = socket.emit("stdout", &json!({ "line": line }));
                                     }
                                     Ok(None) => {
                                         stdout_lines = None;
@@ -155,7 +226,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                                     Err(error) => {
                                         let _ = socket.emit(
                                             "error",
-                                            json!({
+                                            &json!({
                                                 "status": 500,
                                                 "message": format!("stdout read failed: {error}")
                                             }),
@@ -167,7 +238,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                             line = async { stderr_lines.as_mut().unwrap().next_line().await }, if stderr_lines.is_some() => {
                                 match line {
                                     Ok(Some(line)) => {
-                                        let _ = socket.emit("stderr", json!({ "line": line }));
+                                        let _ = socket.emit("stderr", &json!({ "line": line }));
                                     }
                                     Ok(None) => {
                                         stderr_lines = None;
@@ -175,7 +246,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                                     Err(error) => {
                                         let _ = socket.emit(
                                             "error",
-                                            json!({
+                                            &json!({
                                                 "status": 500,
                                                 "message": format!("stderr read failed: {error}")
                                             }),
@@ -187,7 +258,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                         }
                     }
 
-                    let _ = socket.emit("exit", json!({ "code": exit_code.unwrap_or(-1) }));
+                    let _ = socket.emit("exit", &json!({ "code": exit_code.unwrap_or(-1) }));
                 }
             });
         }
@@ -223,4 +294,49 @@ fn build_args(payload: &CommandPayload) -> Result<Vec<String>, String> {
     }
 
     Err("provide non-empty args or command".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_response_emits_screenshot_payload_on_success() {
+        let result = ScreenshotResult {
+            width: 1280,
+            height: 720,
+            monitor: Some("main".to_string()),
+            png_base64: "abc123".to_string(),
+        };
+
+        let (event, payload) = screenshot_response(Ok(Ok(result)));
+
+        assert_eq!(event, "screenshot");
+        assert_eq!(payload["width"], 1280);
+        assert_eq!(payload["height"], 720);
+        assert_eq!(payload["monitor"], "main");
+        assert_eq!(payload["png_base64"], "abc123");
+    }
+
+    #[test]
+    fn screenshot_response_emits_error_payload_on_capture_error() {
+        let error = std::io::Error::other("capture backend unavailable");
+        let (event, payload) = screenshot_response(Ok(Err(Box::new(error))));
+
+        assert_eq!(event, "error");
+        assert_eq!(payload["status"], 500);
+        assert!(payload["message"]
+            .as_str()
+            .expect("error message")
+            .contains("capture backend unavailable"));
+    }
+
+    #[test]
+    fn screenshot_response_emits_error_payload_on_panic() {
+        let (event, payload) = screenshot_response(Err(Box::new("panic")));
+
+        assert_eq!(event, "error");
+        assert_eq!(payload["status"], 500);
+        assert_eq!(payload["message"], "screenshot failed: panic in capture backend");
+    }
 }
