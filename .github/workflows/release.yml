@@ -21,17 +21,17 @@ jobs:
       matrix:
         include:
           - name: Linux x64
-            os: ubuntu-latest
+            os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             binary: agent-browser-socket-linux-x64
           - name: Linux ARM64
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             binary: agent-browser-socket-linux-arm64
           - name: Windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: agent-browser-socket-win32-x64.exe
+            binary: agent-browser-socket-windows.exe
           - name: macOS x64
             os: macos-latest
             target: x86_64-apple-darwin
@@ -97,9 +97,9 @@ jobs:
           retention-days: 7
 
   release:
-    name: Draft Release
+    name: Merge & Draft Release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -107,24 +107,93 @@ jobs:
         with:
           path: artifacts/
 
-      - name: Collect binaries
+      - name: List downloaded artifacts
+        run: |
+          find artifacts -type f | sort
+
+      - name: Create macOS universal binary
         run: |
           mkdir -p bin
-          find artifacts -type f -name 'agent-browser-socket-*' -exec mv {} bin/ \;
-          chmod +x bin/agent-browser-socket-* 2>/dev/null || true
-          echo "Binaries:" && ls -la bin/
+          lipo -create \
+            artifacts/agent-browser-socket-darwin-x64/agent-browser-socket-darwin-x64 \
+            artifacts/agent-browser-socket-darwin-arm64/agent-browser-socket-darwin-arm64 \
+            -output bin/agent-browser-socket-mac
+          chmod +x bin/agent-browser-socket-mac
+          lipo -info bin/agent-browser-socket-mac
+
+      - name: Create Linux self-extracting wrapper
+        run: |
+          mkdir -p /tmp/abs-linux-payload
+          cp artifacts/agent-browser-socket-linux-x64/agent-browser-socket-linux-x64 /tmp/abs-linux-payload/
+          cp artifacts/agent-browser-socket-linux-arm64/agent-browser-socket-linux-arm64 /tmp/abs-linux-payload/
+          chmod +x /tmp/abs-linux-payload/agent-browser-socket-linux-x64
+          chmod +x /tmp/abs-linux-payload/agent-browser-socket-linux-arm64
+
+          cat > bin/agent-browser-socket-linux <<'WRAPPER'
+          #!/usr/bin/env sh
+          set -eu
+
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64|amd64)
+              BIN="agent-browser-socket-linux-x64"
+              ;;
+            aarch64|arm64)
+              BIN="agent-browser-socket-linux-arm64"
+              ;;
+            *)
+              echo "Unsupported architecture: $ARCH" >&2
+              exit 1
+              ;;
+          esac
+
+          SELF="$0"
+          PAYLOAD_LINE="$(awk '/^__ABS_LINUX_PAYLOAD__$/ { print NR + 1; exit }' "$SELF")"
+          if [ -z "${PAYLOAD_LINE:-}" ]; then
+            echo "Corrupt launcher: missing payload marker" >&2
+            exit 1
+          fi
+
+          TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/abs-linux.XXXXXX")"
+          trap 'rm -rf "$TMPDIR"' EXIT INT TERM
+
+          tail -n +"$PAYLOAD_LINE" "$SELF" | tar -xzf - -C "$TMPDIR"
+          chmod +x "$TMPDIR/$BIN"
+          exec "$TMPDIR/$BIN" "$@"
+          __ABS_LINUX_PAYLOAD__
+          WRAPPER
+
+          tar -czf /tmp/agent-browser-socket-linux-payload.tgz -C /tmp/abs-linux-payload .
+          cat /tmp/agent-browser-socket-linux-payload.tgz >> bin/agent-browser-socket-linux
+          chmod +x bin/agent-browser-socket-linux
+          rm -f /tmp/agent-browser-socket-linux-payload.tgz
+
+      - name: Finalize Windows binary
+        run: |
+          cp artifacts/agent-browser-socket-windows.exe/agent-browser-socket-windows.exe \
+            bin/agent-browser-socket-windows.exe
+
+      - name: Verify release binaries
+        run: |
+          ls -la bin/
+          test -f bin/agent-browser-socket-mac
+          test -f bin/agent-browser-socket-linux
+          test -f bin/agent-browser-socket-windows.exe
+          grep -q '^__ABS_LINUX_PAYLOAD__$' bin/agent-browser-socket-linux
 
       - name: Upsert draft release
         run: |
-          TAG="latest"
+          TAG="nightly"
           if gh release view "$TAG" &>/dev/null; then
             gh release delete "$TAG" --yes
           fi
           gh release create "$TAG" \
-            --title "Latest (draft)" \
+            --title "Nightly (draft)" \
             --draft \
             --prerelease \
-            --notes "Auto-built from \`main\` ($(git rev-parse --short HEAD))" \
-            bin/agent-browser-socket-*
+            --notes "Nightly auto-build from \`main\` ($(git rev-parse --short HEAD))" \
+            bin/agent-browser-socket-mac \
+            bin/agent-browser-socket-linux \
+            bin/agent-browser-socket-windows.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

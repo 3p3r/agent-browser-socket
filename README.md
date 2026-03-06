@@ -16,6 +16,20 @@ Socket.IO wrapper for `agent-browser` that embeds the correct release binary for
 - macOS: `x86_64`, `aarch64`
 - Windows: `x86_64`
 
+## Nightly draft releases
+
+Pushes to `main` publish a draft prerelease tagged `nightly` with 3 platform artifacts:
+
+- `agent-browser-socket-linux` (self-extracting launcher containing Linux `x86_64` + `aarch64` binaries)
+- `agent-browser-socket-mac` (universal Mach-O merged from macOS `x86_64` + `aarch64`)
+- `agent-browser-socket-windows.exe` (Windows `x86_64`)
+
+Notes:
+
+- On Linux, the launcher detects `uname -m`, extracts the matching embedded binary to a temp directory, and executes it.
+- Linux binaries are built on Ubuntu 22.04 runners to keep glibc compatibility broad (roughly glibc `2.35+`).
+- The workflow keeps the release as draft + prerelease for iterative testing.
+
 ## Config
 
 Config is optional and loaded in this order:
