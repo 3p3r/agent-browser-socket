@@ -97,6 +97,12 @@ cargo run -- --command open https://example.com
 
 `--command` forwards every following argument to the inner `agent-browser` process and exits with the same exit code.
 
+Clean cached embedded binary from disk:
+
+```bash
+cargo run -- --clean
+```
+
 ## HTTP endpoints
 
 - `GET /health` -> `{ "status": "ok" }`

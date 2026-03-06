@@ -399,3 +399,23 @@ fn embedded_binary_extracts_and_reuses_cache_file() {
     let second_meta = std::fs::metadata(&second).expect("metadata second");
     assert_eq!(first_meta.len(), second_meta.len(), "binary length should remain stable");
 }
+
+#[test]
+fn cli_clean_removes_cached_embedded_binary() {
+    let _guard = lock_env();
+
+    let cache_root = create_clean_cache_root();
+    let _xdg_guard = EnvVarGuard::set("XDG_CACHE_HOME", cache_root.as_os_str());
+    #[cfg(windows)]
+    let _localapp_guard = EnvVarGuard::set("LOCALAPPDATA", cache_root.as_os_str());
+
+    let extracted = embedded_binary::resolve_binary_path(None).expect("extract binary before clean");
+    assert!(extracted.exists(), "binary should exist before clean");
+
+    let clean_result = embedded_binary::clean_cached_binary().expect("clean cached binary");
+    assert!(clean_result, "clean should report removed binary");
+    assert!(!extracted.exists(), "binary should be removed after clean");
+
+    let second_clean = embedded_binary::clean_cached_binary().expect("clean cached binary second time");
+    assert!(!second_clean, "second clean should report nothing to remove");
+}

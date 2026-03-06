@@ -1,5 +1,5 @@
 use crate::configuration::{load_config, AppConfig};
-use crate::embedded_binary::resolve_binary_path;
+use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
 use crate::screenshot::capture_screenshot;
 use crate::server::{build_router, AppState};
 use std::error::Error;
@@ -14,6 +14,7 @@ use tokio::process::Command;
 pub enum CliMode {
     Serve,
     Version,
+    Clean,
     Screenshot,
     Command(Vec<OsString>),
 }
@@ -32,6 +33,13 @@ pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
     let take_screenshot = args
         .iter()
         .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--screenshot"));
+    let clean_binary = args
+        .iter()
+        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--clean"));
+
+    if clean_binary {
+        return CliMode::Clean;
+    }
 
     if take_screenshot {
         return CliMode::Screenshot;
@@ -59,6 +67,15 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
         }
         CliMode::Version => {
             println!("agent-browser-socket {}", env!("CARGO_PKG_VERSION"));
+            Ok(0)
+        }
+        CliMode::Clean => {
+            if clean_cached_binary()? {
+                println!("cleaned cached embedded browser binary");
+            } else {
+                println!("no cached embedded browser binary found");
+            }
+
             Ok(0)
         }
         CliMode::Screenshot => {
@@ -214,8 +231,15 @@ mod tests {
         assert_eq!(parse_cli_mode(&[OsString::from("--version")]), CliMode::Version);
         assert_eq!(parse_cli_mode(&[OsString::from("-V")]), CliMode::Version);
         assert_eq!(parse_cli_mode(&[OsString::from("version")]), CliMode::Version);
+        assert_eq!(parse_cli_mode(&[OsString::from("--clean")]), CliMode::Clean);
         assert_eq!(parse_cli_mode(&[OsString::from("--screenshot")]), CliMode::Screenshot);
         assert_eq!(parse_cli_mode(&[OsString::from("serve")]), CliMode::Serve);
+    }
+
+    #[tokio::test]
+    async fn run_with_args_clean_returns_zero() {
+        let result = run_with_args(vec![OsString::from("--clean")]).await.expect("run clean");
+        assert_eq!(result, 0);
     }
 
     #[tokio::test]
