@@ -97,7 +97,7 @@ jobs:
           retention-days: 7
 
   release:
-    name: Merge & Draft Release
+    name: Merge Release Binaries
     needs: build
     runs-on: macos-latest
     steps:
@@ -181,6 +181,76 @@ jobs:
           test -f bin/agent-browser-socket-windows.exe
           grep -q '^__ABS_LINUX_PAYLOAD__$' bin/agent-browser-socket-linux
 
+      - name: Upload universal binaries for testing
+        uses: actions/upload-artifact@v4
+        with:
+          name: universal-binaries
+          path: |
+            bin/agent-browser-socket-mac
+            bin/agent-browser-socket-linux
+            bin/agent-browser-socket-windows.exe
+          retention-days: 7
+
+  test-binaries:
+    name: Test ${{ matrix.name }}
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-22.04
+            binary: agent-browser-socket-linux
+          - name: Linux ARM64
+            os: ubuntu-22.04-arm
+            binary: agent-browser-socket-linux
+          - name: macOS x64
+            os: macos-latest
+            binary: agent-browser-socket-mac
+          - name: macOS ARM64
+            os: macos-latest
+            binary: agent-browser-socket-mac
+          - name: Windows x64
+            os: windows-latest
+            binary: agent-browser-socket-windows.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install JS dependencies
+        run: npm install --no-audit --no-fund
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: universal-binaries
+          path: bin/
+
+      - name: Make binary executable
+        if: runner.os != 'Windows'
+        run: chmod +x bin/${{ matrix.binary }}
+
+      - name: Run binary smoke tests
+        run: npm run test:binary -- bin/${{ matrix.binary }}
+
+  publish-nightly:
+    name: Publish Nightly Draft Release
+    needs:
+      - release
+      - test-binaries
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: universal-binaries
+          path: bin/
+
       - name: Upsert draft release
         run: |
           TAG="nightly"
@@ -191,7 +261,7 @@ jobs:
             --title "Nightly (draft)" \
             --draft \
             --prerelease \
-            --notes "Nightly auto-build from \`main\` ($(git rev-parse --short HEAD))" \
+            --notes "Nightly auto-build from \`main\` (${GITHUB_SHA::7})" \
             bin/agent-browser-socket-mac \
             bin/agent-browser-socket-linux \
             bin/agent-browser-socket-windows.exe
