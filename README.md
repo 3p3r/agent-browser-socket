@@ -1,52 +1,78 @@
 # agent-browser-socket
 
-Socket.IO wrapper for `agent-browser` that embeds the correct release binary for the target platform at build time.
+`agent-browser-socket` is a local bridge for web apps with browser-based agents.
 
-## What it does
+Primary use: your web app talks to this local Socket.IO server, and the server runs `agent-browser` on the same machine.
 
-- Downloads and embeds `agent-browser` from GitHub Releases during build.
-- Runs a local Socket.IO server.
-- Accepts CLI commands over Socket.IO and executes the embedded `agent-browser` binary.
-- Streams `stdout` and `stderr` back to the client in real time.
-- Performs nginx-style auth subrequest checks per command event when configured.
+This README is for users downloading the release binaries.
 
-## Supported platforms
+## Download
 
-- Linux: `x86_64`, `aarch64`
-- macOS: `x86_64`, `aarch64`
-- Windows: `x86_64`
+Download from:
 
-## Nightly draft releases
+[https://github.com/3p3r/agent-browser-socket/releases](https://github.com/3p3r/agent-browser-socket/releases)
 
-Pushes to `main` publish a draft prerelease tagged `nightly` with 3 platform artifacts:
+Then pick the file for your OS:
 
-- `agent-browser-socket-linux` (self-extracting launcher containing Linux `x86_64` + `aarch64` binaries)
-- `agent-browser-socket-mac` (universal Mach-O merged from macOS `x86_64` + `aarch64`)
-- `agent-browser-socket-windows.exe` (Windows `x86_64`)
+- Linux: `agent-browser-socket-linux`
+- macOS: `agent-browser-socket-mac`
+- Windows: `agent-browser-socket-windows.exe`
 
 Notes:
 
-- On Linux, the launcher detects `uname -m`, extracts the matching embedded binary to a temp directory, and executes it.
-- Linux binaries are built on Ubuntu 22.04 runners to keep glibc compatibility broad (roughly glibc `2.35+`).
-- The workflow keeps the release as draft + prerelease for iterative testing.
+- Linux binary is a self-extracting launcher that works on both `x86_64` and `aarch64`.
+- macOS binary is universal (`x86_64` + `aarch64`).
+- Linux builds target broad glibc compatibility (roughly `2.35+`).
+- Binaries are all 64 bit
 
-## Config
+## Run (Socket.IO server)
 
-Config is optional and loaded in this order:
+This is the main mode used by web apps.
 
-1. defaults
-2. `~/.abs` (fallback)
-3. `./.abs` (local override)
-4. `ABS_` environment variables (highest priority)
+### Linux
 
-Defaults:
+```bash
+chmod +x ./agent-browser-socket-linux
+./agent-browser-socket-linux
+```
+
+### macOS
+
+```bash
+chmod +x ./agent-browser-socket-mac
+./agent-browser-socket-mac
+```
+
+### Windows (PowerShell)
+
+```powershell
+.\agent-browser-socket-windows.exe
+```
+
+Default server address: `http://0.0.0.0:9607`
+
+Health check:
+
+- `GET /health` → `{ "status": "ok" }`
+- `GET /version` → `{ "version": "<wrapper-version>" }`
+
+## Optional configuration
+
+If you do nothing, defaults are used:
 
 - `port = 9607`
 - `host = "0.0.0.0"`
 - `auth_url = null`
 - `browser_path = null`
 
-Example `.abs` (TOML):
+Load order (last one wins):
+
+1. built-in defaults
+2. `~/.abs`
+3. `./.abs`
+4. `ABS_` environment variables
+
+Example `.abs` file:
 
 ```toml
 auth_url = "http://127.0.0.1:8080/auth"
@@ -55,131 +81,73 @@ host = "0.0.0.0"
 browser_path = "/usr/local/bin/agent-browser"
 ```
 
-Env examples:
+## Useful binary flags
 
 ```bash
-ABS_PORT=9607
-ABS_HOST=0.0.0.0
-ABS_AUTH_URL=http://127.0.0.1:8080/auth
-ABS_BROWSER_PATH=/custom/path/agent-browser
+# show wrapper version
+./agent-browser-socket-linux --version
+
+# pass args directly to inner agent-browser
+./agent-browser-socket-linux --command --version
+
+# delete cached embedded browser binary
+./agent-browser-socket-linux --clean
+
+# capture desktop screenshots as JSON
+./agent-browser-socket-linux --screenshot
 ```
 
-## Run
+## MCP mode (secondary)
+
+Start as an MCP stdio server:
+
+```bash
+./agent-browser-socket-linux --mcp
+```
+
+Exposed MCP tools:
+
+- Browser: `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_fill`, `browser_select`, `browser_hover`, `browser_evaluate`, `browser_set_viewport`
+- API: `api_get`, `api_post`, `api_put`, `api_patch`, `api_delete`
+
+Example MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "agent-browser-socket": {
+      "command": "agent-browser-socket",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+## Socket.IO auth behavior (optional)
+
+If `auth_url` is set, every `command` event runs an auth subrequest:
+
+- `2xx`: command allowed
+- `401` / `403`: denied
+- any other status or network failure: error
+
+Forwarded headers:
+
+- `Authorization`
+- `Cookie`
+- `X-Original-URI: /socket.io`
+
+## For developers (optional)
+
+If you are building from source:
 
 ```bash
 cargo run
-```
-
-The server listens on `host:port` from config.
-
-## Test
-
-```bash
-cargo test --test e2e -- --nocapture
-```
-
-The E2E suite uses the official Node `socket.io-client` and will auto-run `npm install --silent` on first run.
-
-## Coverage
-
-Install once:
-
-```bash
-cargo install cargo-tarpaulin
-```
-
-Run coverage:
-
-```bash
+cargo test
 cargo coverage
 ```
 
-CLI version:
+Coverage outputs:
 
-```bash
-cargo run -- --version
-# or
-cargo run -- version
-```
-
-CLI passthrough to embedded/override agent-browser:
-
-```bash
-cargo run -- --command --version
-cargo run -- --command open https://example.com
-```
-
-`--command` forwards every following argument to the inner `agent-browser` process and exits with the same exit code.
-
-Clean cached embedded binary from disk:
-
-```bash
-cargo run -- --clean
-```
-
-## HTTP endpoints
-
-- `GET /health` -> `{ "status": "ok" }`
-- `GET /version` -> `{ "version": "<wrapper-version>" }`
-
-## Socket.IO protocol
-
-Client emits `command`:
-
-```json
-{
-	"args": ["--version"],
-	"env": {
-		"AGENT_BROWSER_SESSION": "my-session"
-	},
-	"authorization": "Bearer ...",
-	"cookie": "session=..."
-}
-```
-
-Or:
-
-```json
-{
-	"command": "open https://example.com"
-}
-```
-
-Server emits:
-
-- `stdout` → `{ "line": "..." }`
-- `stderr` → `{ "line": "..." }`
-- `exit` → `{ "code": 0 }`
-- `error` → `{ "status": 401, "message": "authorization denied" }`
-
-Additional Socket.IO events:
-
-- client emits `health` -> server emits `health` with `{ "status": "ok" }`
-- client emits `version` -> server emits `version` with `{ "version": "<wrapper-version>" }`
-- client emits `screenshot` -> server emits `screenshot` with an array of monitor screenshots:
-
-```json
-[
-	{
-		"width": 1920,
-		"height": 1080,
-		"monitor": "Display 1",
-		"png_base64": "..."
-	}
-]
-```
-
-## Auth subrequest behavior
-
-When `auth_url` is set, every `command` event triggers a subrequest:
-
-- 2xx: command allowed
-- 401: denied (unauthorized)
-- 403: denied (forbidden)
-- other: treated as error
-
-The subrequest forwards:
-
-- `Authorization` (from event payload)
-- `Cookie` (from event payload)
-- `X-Original-URI: /socket.io`
+- `coverage/tarpaulin-report.html`
+- `coverage/lcov.info`

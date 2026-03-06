@@ -16,6 +16,7 @@ pub enum CliMode {
     Version,
     Clean,
     Screenshot,
+    Mcp,
     Command(Vec<OsString>),
 }
 
@@ -24,6 +25,13 @@ pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
     if let Some(index) = args.iter().position(|arg| arg == &command_flag) {
         let forwarded = args.iter().skip(index + 1).cloned().collect();
         return CliMode::Command(forwarded);
+    }
+
+    let mcp_mode = args
+        .iter()
+        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--mcp"));
+    if mcp_mode {
+        return CliMode::Mcp;
     }
 
     let show_version = args
@@ -82,6 +90,9 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             let screenshots = capture_all_screenshots()?;
             println!("{}", serde_json::to_string(&screenshots)?);
             Ok(0)
+        }
+        CliMode::Mcp => {
+            crate::mcp::run_mcp_stdio().await
         }
         CliMode::Serve => {
             let config = load_config()?;
@@ -233,6 +244,7 @@ mod tests {
         assert_eq!(parse_cli_mode(&[OsString::from("version")]), CliMode::Version);
         assert_eq!(parse_cli_mode(&[OsString::from("--clean")]), CliMode::Clean);
         assert_eq!(parse_cli_mode(&[OsString::from("--screenshot")]), CliMode::Screenshot);
+        assert_eq!(parse_cli_mode(&[OsString::from("--mcp")]), CliMode::Mcp);
         assert_eq!(parse_cli_mode(&[OsString::from("serve")]), CliMode::Serve);
     }
 

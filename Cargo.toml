@@ -12,12 +12,15 @@ config = { version = "0.15", default-features = false, features = ["toml"] }
 dirs = "6"
 flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rmcp = { version = "1", features = ["server", "transport-io"] }
+schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = "=1.0.145"
 secure-string = "0.3"
 shlex = "1"
 socketioxide = { version = "0.18", features = ["state", "extensions"] }
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
 xcap = "0.4.1"
 base64 = "0.22"
 png = "0.17"

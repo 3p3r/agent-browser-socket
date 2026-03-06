@@ -2,6 +2,7 @@ mod app;
 mod auth;
 mod configuration;
 mod embedded_binary;
+mod mcp;
 mod server;
 mod screenshot;
 
