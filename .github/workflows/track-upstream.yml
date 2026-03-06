@@ -1,0 +1,108 @@
+name: Track Upstream Agent Browser
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: track-upstream-agent-browser
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check-upstream:
+    name: Check upstream release and update pin
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare upstream vs pinned version
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_json="$(gh api repos/vercel-labs/agent-browser/releases/latest)"
+          latest_tag="$(printf '%s' "$release_json" | jq -r '.tag_name')"
+          pinned_tag="$(grep -oP 'const VERSION: &str = "\K[^"]+' build.rs)"
+
+          required_assets=(
+            "agent-browser-linux-x64"
+            "agent-browser-linux-arm64"
+            "agent-browser-darwin-x64"
+            "agent-browser-darwin-arm64"
+            "agent-browser-win32-x64.exe"
+          )
+
+          missing_assets=0
+          for asset in "${required_assets[@]}"; do
+            present="$(printf '%s' "$release_json" | jq --arg asset "$asset" '[.assets[].name | select(. == $asset)] | length')"
+            if [ "$present" -eq 0 ]; then
+              echo "Missing required upstream asset: $asset"
+              missing_assets=1
+            fi
+          done
+
+          if [ "$missing_assets" -eq 1 ]; then
+            echo "Latest upstream release is incomplete; skipping bump."
+            echo "latest=$latest_tag" >> "$GITHUB_OUTPUT"
+            echo "pinned=$pinned_tag" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Latest upstream: $latest_tag"
+          echo "Pinned in build.rs: $pinned_tag"
+
+          echo "latest=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "pinned=$pinned_tag" >> "$GITHUB_OUTPUT"
+
+          if [ "$latest_tag" = "$pinned_tag" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Up to date; no bump required."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "New upstream release detected."
+          fi
+
+      - name: Update build.rs VERSION constant
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          LATEST_TAG: ${{ steps.compare.outputs.latest }}
+        run: |
+          set -euo pipefail
+          sed -i "s/^const VERSION: &str = \".*\";/const VERSION: &str = \"${LATEST_TAG}\";/" build.rs
+
+      - name: Commit and push version bump
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          LATEST_TAG: ${{ steps.compare.outputs.latest }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add build.rs
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: bump embedded agent-browser to ${LATEST_TAG}"
+          git push origin HEAD:main
+
+      - name: Trigger nightly release workflow
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref main
+          echo "Triggered release.yml on main."
