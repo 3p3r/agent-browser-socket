@@ -1,6 +1,6 @@
 use crate::configuration::{load_config, AppConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
-use crate::screenshot::capture_screenshot;
+use crate::screenshot::capture_all_screenshots;
 use crate::server::{build_router, AppState};
 use std::error::Error;
 use std::ffi::OsString;
@@ -79,8 +79,8 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             Ok(0)
         }
         CliMode::Screenshot => {
-            let screenshot = capture_screenshot()?;
-            println!("{}", serde_json::to_string(&screenshot)?);
+            let screenshots = capture_all_screenshots()?;
+            println!("{}", serde_json::to_string(&screenshots)?);
             Ok(0)
         }
         CliMode::Serve => {

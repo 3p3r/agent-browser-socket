@@ -25,26 +25,29 @@ fn encode_png_base64(width: u32, height: u32, rgba: &[u8]) -> Result<String, Box
     Ok(STANDARD.encode(bytes))
 }
 
-pub fn capture_screenshot() -> Result<ScreenshotResult, Box<dyn Error>> {
+pub fn capture_all_screenshots() -> Result<Vec<ScreenshotResult>, Box<dyn Error>> {
     let monitors = Monitor::all()?;
-    let monitor = monitors
-        .into_iter()
-        .find(|monitor| monitor.is_primary().unwrap_or(false))
-        .or_else(|| Monitor::all().ok().and_then(|all| all.into_iter().next()))
-        .ok_or_else(|| "no monitor available for screenshot capture".to_string())?;
+    if monitors.is_empty() {
+        return Err("no monitor available for screenshot capture".into());
+    }
 
-    let monitor_name = monitor.name().ok();
-    let image = monitor.capture_image()?;
-    let width = image.width();
-    let height = image.height();
-    let rgba = image.into_raw();
+    let mut screenshots = Vec::with_capacity(monitors.len());
+    for monitor in monitors {
+        let monitor_name = monitor.name().ok();
+        let image = monitor.capture_image()?;
+        let width = image.width();
+        let height = image.height();
+        let rgba = image.into_raw();
 
-    Ok(ScreenshotResult {
-        width,
-        height,
-        monitor: monitor_name,
-        png_base64: encode_png_base64(width, height, &rgba)?,
-    })
+        screenshots.push(ScreenshotResult {
+            width,
+            height,
+            monitor: monitor_name,
+            png_base64: encode_png_base64(width, height, &rgba)?,
+        });
+    }
+
+    Ok(screenshots)
 }
 
 #[cfg(test)]

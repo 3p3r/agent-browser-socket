@@ -407,5 +407,10 @@ async fn socket_screenshot_auth_200_forwards_headers_and_responds() {
 
     if let Some(error) = error_event {
         assert_eq!(error["data"]["status"], 500);
+    } else if let Some(screenshot) = screenshot_event {
+        assert!(
+            screenshot["data"].is_array(),
+            "screenshot event should return an array of monitor screenshots"
+        );
     }
 }

@@ -142,6 +142,18 @@ Additional Socket.IO events:
 
 - client emits `health` -> server emits `health` with `{ "status": "ok" }`
 - client emits `version` -> server emits `version` with `{ "version": "<wrapper-version>" }`
+- client emits `screenshot` -> server emits `screenshot` with an array of monitor screenshots:
+
+```json
+[
+	{
+		"width": 1920,
+		"height": 1080,
+		"monitor": "Display 1",
+		"png_base64": "..."
+	}
+]
+```
 
 ## Auth subrequest behavior
 

@@ -1,5 +1,5 @@
 use crate::auth::check_auth;
-use crate::screenshot::{capture_screenshot, ScreenshotResult};
+use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -35,17 +35,12 @@ pub struct ScreenshotPayload {
 }
 
 fn screenshot_response(
-    screenshot_result: std::thread::Result<Result<ScreenshotResult, Box<dyn std::error::Error>>>,
+    screenshot_result: std::thread::Result<Result<Vec<ScreenshotResult>, Box<dyn std::error::Error>>>,
 ) -> (&'static str, serde_json::Value) {
     match screenshot_result {
-        Ok(Ok(screenshot)) => (
+        Ok(Ok(screenshots)) => (
             "screenshot",
-            json!({
-                "width": screenshot.width,
-                "height": screenshot.height,
-                "monitor": screenshot.monitor,
-                "png_base64": screenshot.png_base64
-            }),
+            json!(screenshots),
         ),
         Ok(Err(error)) => (
             "error",
@@ -114,7 +109,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                             return;
                         }
 
-                        let screenshot_result = std::panic::catch_unwind(capture_screenshot);
+                        let screenshot_result = std::panic::catch_unwind(capture_all_screenshots);
 
                         let (event, payload) = screenshot_response(screenshot_result);
                         let _ = socket.emit(event, &payload);
@@ -302,20 +297,33 @@ mod tests {
 
     #[test]
     fn screenshot_response_emits_screenshot_payload_on_success() {
-        let result = ScreenshotResult {
-            width: 1280,
-            height: 720,
-            monitor: Some("main".to_string()),
-            png_base64: "abc123".to_string(),
-        };
+        let result = vec![
+            ScreenshotResult {
+                width: 1280,
+                height: 720,
+                monitor: Some("main".to_string()),
+                png_base64: "abc123".to_string(),
+            },
+            ScreenshotResult {
+                width: 1920,
+                height: 1080,
+                monitor: Some("second".to_string()),
+                png_base64: "def456".to_string(),
+            },
+        ];
 
         let (event, payload) = screenshot_response(Ok(Ok(result)));
 
         assert_eq!(event, "screenshot");
-        assert_eq!(payload["width"], 1280);
-        assert_eq!(payload["height"], 720);
-        assert_eq!(payload["monitor"], "main");
-        assert_eq!(payload["png_base64"], "abc123");
+        assert!(payload.is_array());
+        assert_eq!(payload[0]["width"], 1280);
+        assert_eq!(payload[0]["height"], 720);
+        assert_eq!(payload[0]["monitor"], "main");
+        assert_eq!(payload[0]["png_base64"], "abc123");
+        assert_eq!(payload[1]["width"], 1920);
+        assert_eq!(payload[1]["height"], 1080);
+        assert_eq!(payload[1]["monitor"], "second");
+        assert_eq!(payload[1]["png_base64"], "def456");
     }
 
     #[test]
