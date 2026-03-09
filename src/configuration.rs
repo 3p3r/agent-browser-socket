@@ -1,7 +1,7 @@
 use config::{Config, Environment, File, FileFormat};
 use dirs::home_dir;
-use serde::Deserialize;
 use secure_string::SecureString;
+use serde::Deserialize;
 use std::env;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,12 +39,16 @@ pub fn load_config() -> Result<AppConfig, config::ConfigError> {
 
     if !has_home_abs && !has_local_abs && !has_abs_env {
         let embedded_default = embedded_secure_default_config();
-        builder = builder.add_source(File::from_str(embedded_default.unsecure(), FileFormat::Toml));
+        builder = builder.add_source(File::from_str(
+            embedded_default.unsecure(),
+            FileFormat::Toml,
+        ));
     }
 
     if let Some(home_abs) = home_abs {
-        builder =
-            builder.add_source(File::new(home_abs.to_string_lossy().as_ref(), FileFormat::Toml).required(false));
+        builder = builder.add_source(
+            File::new(home_abs.to_string_lossy().as_ref(), FileFormat::Toml).required(false),
+        );
     }
 
     builder = builder

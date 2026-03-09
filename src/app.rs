@@ -56,9 +56,12 @@ pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
         return CliMode::UnregisterUri;
     }
 
-    let show_version = args
-        .iter()
-        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "version" | "--version" | "-V"));
+    let show_version = args.iter().any(|arg| {
+        matches!(
+            arg.to_string_lossy().as_ref(),
+            "version" | "--version" | "-V"
+        )
+    });
 
     let take_screenshot = args
         .iter()
@@ -77,17 +80,14 @@ pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
 
     if show_version {
         CliMode::Version
-    } else if let Some(uri) = args
-        .iter()
-        .find_map(|arg| {
-            let candidate = arg.to_string_lossy();
-            if candidate.contains("://") {
-                Some(candidate.to_string())
-            } else {
-                None
-            }
-        })
-    {
+    } else if let Some(uri) = args.iter().find_map(|arg| {
+        let candidate = arg.to_string_lossy();
+        if candidate.contains("://") {
+            Some(candidate.to_string())
+        } else {
+            None
+        }
+    }) {
         CliMode::UriLaunch(uri)
     } else {
         CliMode::Serve
@@ -172,9 +172,7 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             println!("{}", serde_json::to_string(&screenshots)?);
             Ok(0)
         }
-        CliMode::Mcp => {
-            crate::mcp::run_mcp_stdio().await
-        }
+        CliMode::Mcp => crate::mcp::run_mcp_stdio().await,
         CliMode::UriLaunch(uri) => {
             ensure_uri_scheme_registered()?;
 
@@ -217,7 +215,10 @@ pub async fn run_command_passthrough(
     Ok(status.code().unwrap_or(1))
 }
 
-pub async fn run_server_with_shutdown<F>(config: AppConfig, shutdown: F) -> Result<(), Box<dyn Error>>
+pub async fn run_server_with_shutdown<F>(
+    config: AppConfig,
+    shutdown: F,
+) -> Result<(), Box<dyn Error>>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -272,7 +273,13 @@ mod tests {
 
     fn clear_abs_env() {
         let keys: Vec<String> = std::env::vars()
-            .filter_map(|(key, _)| if key.starts_with("ABS_") { Some(key) } else { None })
+            .filter_map(|(key, _)| {
+                if key.starts_with("ABS_") {
+                    Some(key)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         for key in keys {
@@ -350,11 +357,20 @@ mod tests {
 
     #[test]
     fn parse_cli_mode_recognizes_version_aliases() {
-        assert_eq!(parse_cli_mode(&[OsString::from("--version")]), CliMode::Version);
+        assert_eq!(
+            parse_cli_mode(&[OsString::from("--version")]),
+            CliMode::Version
+        );
         assert_eq!(parse_cli_mode(&[OsString::from("-V")]), CliMode::Version);
-        assert_eq!(parse_cli_mode(&[OsString::from("version")]), CliMode::Version);
+        assert_eq!(
+            parse_cli_mode(&[OsString::from("version")]),
+            CliMode::Version
+        );
         assert_eq!(parse_cli_mode(&[OsString::from("--clean")]), CliMode::Clean);
-        assert_eq!(parse_cli_mode(&[OsString::from("--screenshot")]), CliMode::Screenshot);
+        assert_eq!(
+            parse_cli_mode(&[OsString::from("--screenshot")]),
+            CliMode::Screenshot
+        );
         assert_eq!(parse_cli_mode(&[OsString::from("--mcp")]), CliMode::Mcp);
         assert_eq!(
             parse_cli_mode(&[OsString::from("--register-uri")]),
@@ -384,7 +400,8 @@ mod tests {
         assert_eq!(config.port, 7777);
         assert_eq!(config.host, "0.0.0.0");
 
-        apply_uri_overrides(&mut config, "abs://open?port=8888&host=127.0.0.1").expect("full override");
+        apply_uri_overrides(&mut config, "abs://open?port=8888&host=127.0.0.1")
+            .expect("full override");
         assert_eq!(config.port, 8888);
         assert_eq!(config.host, "127.0.0.1");
 
@@ -395,13 +412,17 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_args_clean_returns_zero() {
-        let result = run_with_args(vec![OsString::from("--clean")]).await.expect("run clean");
+        let result = run_with_args(vec![OsString::from("--clean")])
+            .await
+            .expect("run clean");
         assert_eq!(result, 0);
     }
 
     #[tokio::test]
     async fn run_with_args_returns_2_for_empty_command_passthrough() {
-        let result = run_with_args(vec![OsString::from("--command")]).await.expect("run result");
+        let result = run_with_args(vec![OsString::from("--command")])
+            .await
+            .expect("run result");
         assert_eq!(result, 2);
     }
 
@@ -463,7 +484,10 @@ mod tests {
         };
 
         let result = run_server_with_shutdown(config, async {}).await;
-        assert!(result.is_ok(), "expected clean startup/shutdown for serve path");
+        assert!(
+            result.is_ok(),
+            "expected clean startup/shutdown for serve path"
+        );
     }
 
     #[tokio::test]

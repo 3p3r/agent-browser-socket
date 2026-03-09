@@ -25,10 +25,7 @@ pub async fn check_auth(
         request = request.header(HEADER_COOKIE, value);
     }
 
-    request = request.header(
-        HEADER_X_ORIGINAL_URI,
-        "/socket.io",
-    );
+    request = request.header(HEADER_X_ORIGINAL_URI, "/socket.io");
 
     let response = request
         .send()

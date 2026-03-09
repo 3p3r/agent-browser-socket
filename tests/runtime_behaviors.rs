@@ -160,9 +160,16 @@ fn resolve_wrapper_executable() -> PathBuf {
         .args(["build"])
         .status()
         .expect("run cargo build for wrapper binary");
-    assert!(status.success(), "cargo build failed while preparing wrapper executable");
+    assert!(
+        status.success(),
+        "cargo build failed while preparing wrapper executable"
+    );
 
-    assert!(candidate.exists(), "wrapper executable not found at {}", candidate.display());
+    assert!(
+        candidate.exists(),
+        "wrapper executable not found at {}",
+        candidate.display()
+    );
     candidate
 }
 
@@ -199,7 +206,9 @@ async fn auth_check_maps_status_codes() {
         StatusCode::INTERNAL_SERVER_ERROR
     }
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind auth test server");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind auth test server");
     let port = listener.local_addr().expect("local addr").port();
 
     let app = Router::new()
@@ -219,7 +228,13 @@ async fn auth_check_maps_status_codes() {
 
     let client = reqwest::Client::new();
 
-    let ok = auth::check_auth(&client, Some(&format!("http://127.0.0.1:{port}/ok")), None, None).await;
+    let ok = auth::check_auth(
+        &client,
+        Some(&format!("http://127.0.0.1:{port}/ok")),
+        None,
+        None,
+    )
+    .await;
     assert!(ok.is_ok());
 
     let unauth = auth::check_auth(
@@ -231,10 +246,22 @@ async fn auth_check_maps_status_codes() {
     .await;
     assert_eq!(unauth, Err(StatusCode::UNAUTHORIZED));
 
-    let forbidden = auth::check_auth(&client, Some(&format!("http://127.0.0.1:{port}/forbidden")), None, None).await;
+    let forbidden = auth::check_auth(
+        &client,
+        Some(&format!("http://127.0.0.1:{port}/forbidden")),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(forbidden, Err(StatusCode::FORBIDDEN));
 
-    let err = auth::check_auth(&client, Some(&format!("http://127.0.0.1:{port}/err")), None, None).await;
+    let err = auth::check_auth(
+        &client,
+        Some(&format!("http://127.0.0.1:{port}/err")),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(err, Err(StatusCode::INTERNAL_SERVER_ERROR));
 
     let _ = shutdown_tx.send(());
@@ -280,16 +307,10 @@ fn configuration_local_abs_file_overrides_home_and_defaults() {
     std::fs::create_dir_all(&home).expect("create home dir");
     std::fs::create_dir_all(&local).expect("create work dir");
 
-    std::fs::write(
-        home.join(".abs"),
-        "port = 9101\nhost = \"127.0.0.2\"\n",
-    )
-    .expect("write home abs");
-    std::fs::write(
-        local.join(".abs"),
-        "port = 9999\nhost = \"127.0.0.9\"\n",
-    )
-    .expect("write local abs");
+    std::fs::write(home.join(".abs"), "port = 9101\nhost = \"127.0.0.2\"\n")
+        .expect("write home abs");
+    std::fs::write(local.join(".abs"), "port = 9999\nhost = \"127.0.0.9\"\n")
+        .expect("write local abs");
 
     let _home_guard = EnvVarGuard::set("HOME", home.as_os_str());
     let _cwd = DirGuard::enter(&local);
@@ -367,7 +388,8 @@ fn embedded_binary_override_path_is_returned_unchanged() {
         "/tmp/custom-agent-browser"
     };
 
-    let path = embedded_binary::resolve_binary_path(Some(override_path)).expect("resolve override path");
+    let path =
+        embedded_binary::resolve_binary_path(Some(override_path)).expect("resolve override path");
     assert_eq!(path, PathBuf::from(override_path));
 }
 
@@ -397,7 +419,11 @@ fn embedded_binary_extracts_and_reuses_cache_file() {
     assert_eq!(first, second, "extraction path should be stable and reused");
 
     let second_meta = std::fs::metadata(&second).expect("metadata second");
-    assert_eq!(first_meta.len(), second_meta.len(), "binary length should remain stable");
+    assert_eq!(
+        first_meta.len(),
+        second_meta.len(),
+        "binary length should remain stable"
+    );
 }
 
 #[test]
@@ -409,13 +435,18 @@ fn cli_clean_removes_cached_embedded_binary() {
     #[cfg(windows)]
     let _localapp_guard = EnvVarGuard::set("LOCALAPPDATA", cache_root.as_os_str());
 
-    let extracted = embedded_binary::resolve_binary_path(None).expect("extract binary before clean");
+    let extracted =
+        embedded_binary::resolve_binary_path(None).expect("extract binary before clean");
     assert!(extracted.exists(), "binary should exist before clean");
 
     let clean_result = embedded_binary::clean_cached_binary().expect("clean cached binary");
     assert!(clean_result, "clean should report removed binary");
     assert!(!extracted.exists(), "binary should be removed after clean");
 
-    let second_clean = embedded_binary::clean_cached_binary().expect("clean cached binary second time");
-    assert!(!second_clean, "second clean should report nothing to remove");
+    let second_clean =
+        embedded_binary::clean_cached_binary().expect("clean cached binary second time");
+    assert!(
+        !second_clean,
+        "second clean should report nothing to remove"
+    );
 }

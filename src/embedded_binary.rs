@@ -32,7 +32,9 @@ pub fn resolve_binary_path(browser_override: Option<&str>) -> Result<PathBuf, st
     let app_dir = binary_path
         .parent()
         .map(std::path::Path::to_path_buf)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "invalid cache binary path"))?;
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "invalid cache binary path")
+        })?;
     fs::create_dir_all(&app_dir)?;
     let needs_write = match fs::metadata(&binary_path) {
         Ok(metadata) => metadata.len() != embedded_binary.len() as u64,

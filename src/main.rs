@@ -3,8 +3,8 @@ mod auth;
 mod configuration;
 mod embedded_binary;
 mod mcp;
-mod server;
 mod screenshot;
+mod server;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

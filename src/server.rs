@@ -39,13 +39,12 @@ pub struct ScreenshotPayload {
 }
 
 fn screenshot_response(
-    screenshot_result: std::thread::Result<Result<Vec<ScreenshotResult>, Box<dyn std::error::Error>>>,
+    screenshot_result: std::thread::Result<
+        Result<Vec<ScreenshotResult>, Box<dyn std::error::Error>>,
+    >,
 ) -> (&'static str, serde_json::Value) {
     match screenshot_result {
-        Ok(Ok(screenshots)) => (
-            "screenshot",
-            json!(screenshots),
-        ),
+        Ok(Ok(screenshots)) => ("screenshot", json!(screenshots)),
         Ok(Err(error)) => (
             "error",
             json!({
@@ -372,6 +371,9 @@ mod tests {
 
         assert_eq!(event, "error");
         assert_eq!(payload["status"], 500);
-        assert_eq!(payload["message"], "screenshot failed: panic in capture backend");
+        assert_eq!(
+            payload["message"],
+            "screenshot failed: panic in capture backend"
+        );
     }
 }

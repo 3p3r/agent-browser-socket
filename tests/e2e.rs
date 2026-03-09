@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
 use tokio::process::Command;
+use tokio::sync::oneshot;
 
 #[derive(Clone)]
 struct AuthState {
@@ -85,13 +85,20 @@ async fn start_auth_server(status: StatusCode) -> (RunningServer, Arc<Mutex<Vec<
         seen: seen_headers.clone(),
     };
 
-    async fn auth_handler(State(state): State<AuthState>, headers: HeaderMap) -> (StatusCode, Json<serde_json::Value>) {
+    async fn auth_handler(
+        State(state): State<AuthState>,
+        headers: HeaderMap,
+    ) -> (StatusCode, Json<serde_json::Value>) {
         state.seen.lock().expect("lock poisoned").push(headers);
         (state.status, Json(json!({ "ok": true })))
     }
 
-    let app = Router::new().route("/auth", any(auth_handler)).with_state(auth_state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind auth server");
+    let app = Router::new()
+        .route("/auth", any(auth_handler))
+        .with_state(auth_state);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind auth server");
     let port = listener.local_addr().expect("auth local addr").port();
     let base_url = format!("http://127.0.0.1:{port}");
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -159,7 +166,9 @@ async fn start_main_server(auth_url: Option<String>) -> RunningServer {
     });
 
     let app = build_router(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind main server");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind main server");
     let port = listener.local_addr().expect("main local addr").port();
     let base_url = format!("http://127.0.0.1:{port}");
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -208,7 +217,12 @@ async fn socket_version_event_returns_version() {
 #[tokio::test]
 async fn socket_command_emits_stdout_and_exit() {
     let server = start_main_server(None).await;
-    let events = run_socket_client(&server.base_url, "command", json!({ "args": ["hello", "world"] })).await;
+    let events = run_socket_client(
+        &server.base_url,
+        "command",
+        json!({ "args": ["hello", "world"] }),
+    )
+    .await;
     server.stop().await;
 
     let stdout_lines: Vec<_> = events
@@ -242,23 +256,29 @@ async fn socket_command_empty_input_emits_error() {
 #[tokio::test]
 async fn socket_command_auth_skipped_without_auth_url() {
     let server = start_main_server(None).await;
-    let events = run_socket_client(&server.base_url, "command", json!({ "args": ["no-auth-needed"] })).await;
+    let events = run_socket_client(
+        &server.base_url,
+        "command",
+        json!({ "args": ["no-auth-needed"] }),
+    )
+    .await;
     server.stop().await;
 
-    assert!(events.iter().any(|entry| entry.get("event") == Some(&json!("exit"))));
-    assert!(
-        !events.iter().any(|entry| {
-            entry.get("event") == Some(&json!("error"))
-                && entry["data"]["message"] == "authorization denied"
-        })
-    );
+    assert!(events
+        .iter()
+        .any(|entry| entry.get("event") == Some(&json!("exit"))));
+    assert!(!events.iter().any(|entry| {
+        entry.get("event") == Some(&json!("error"))
+            && entry["data"]["message"] == "authorization denied"
+    }));
 }
 
 #[tokio::test]
 async fn socket_command_auth_401_emits_error() {
     let (auth_server, _) = start_auth_server(StatusCode::UNAUTHORIZED).await;
     let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
-    let events = run_socket_client(&server.base_url, "command", json!({ "args": ["blocked"] })).await;
+    let events =
+        run_socket_client(&server.base_url, "command", json!({ "args": ["blocked"] })).await;
     server.stop().await;
     auth_server.stop().await;
 
@@ -273,7 +293,8 @@ async fn socket_command_auth_401_emits_error() {
 async fn socket_command_auth_403_emits_error() {
     let (auth_server, _) = start_auth_server(StatusCode::FORBIDDEN).await;
     let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
-    let events = run_socket_client(&server.base_url, "command", json!({ "args": ["blocked"] })).await;
+    let events =
+        run_socket_client(&server.base_url, "command", json!({ "args": ["blocked"] })).await;
     server.stop().await;
     auth_server.stop().await;
 
@@ -301,8 +322,12 @@ async fn socket_command_auth_200_allows_and_forwards_headers() {
     server.stop().await;
     auth_server.stop().await;
 
-    assert!(events.iter().any(|entry| entry.get("event") == Some(&json!("exit"))));
-    assert!(!events.iter().any(|entry| entry.get("event") == Some(&json!("error"))));
+    assert!(events
+        .iter()
+        .any(|entry| entry.get("event") == Some(&json!("exit"))));
+    assert!(!events
+        .iter()
+        .any(|entry| entry.get("event") == Some(&json!("error"))));
 
     let captured = seen_headers.lock().expect("lock headers");
     assert!(!captured.is_empty(), "auth endpoint should be called");
@@ -312,8 +337,14 @@ async fn socket_command_auth_200_allows_and_forwards_headers() {
         headers.get("authorization").and_then(|v| v.to_str().ok()),
         Some("Bearer token-123")
     );
-    assert_eq!(headers.get("cookie").and_then(|v| v.to_str().ok()), Some("sid=abc"));
-    assert_eq!(headers.get("x-original-uri").and_then(|v| v.to_str().ok()), Some("/socket.io"));
+    assert_eq!(
+        headers.get("cookie").and_then(|v| v.to_str().ok()),
+        Some("sid=abc")
+    );
+    assert_eq!(
+        headers.get("x-original-uri").and_then(|v| v.to_str().ok()),
+        Some("/socket.io")
+    );
 }
 
 #[tokio::test]
@@ -339,7 +370,8 @@ async fn socket_command_fail_emits_stderr_and_nonzero_exit() {
 async fn socket_command_auth_500_maps_to_error_500() {
     let (auth_server, _) = start_auth_server(StatusCode::INTERNAL_SERVER_ERROR).await;
     let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
-    let events = run_socket_client(&server.base_url, "command", json!({ "args": ["blocked"] })).await;
+    let events =
+        run_socket_client(&server.base_url, "command", json!({ "args": ["blocked"] })).await;
     server.stop().await;
     auth_server.stop().await;
 

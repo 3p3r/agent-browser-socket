@@ -8,11 +8,11 @@ use crate::configuration::load_config;
 use crate::embedded_binary::resolve_binary_path;
 
 use rmcp::{
-    ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
+    ErrorData as McpError, ServerHandler, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -176,7 +176,9 @@ async fn invoke_tool(
         .stdout(ProcessStdio::piped())
         .stderr(ProcessStdio::piped())
         .spawn()
-        .map_err(|e| McpError::internal_error(format!("failed to spawn agent-browser: {e}"), None))?;
+        .map_err(|e| {
+            McpError::internal_error(format!("failed to spawn agent-browser: {e}"), None)
+        })?;
 
     let output = child
         .wait_with_output()
@@ -201,7 +203,9 @@ async fn invoke_tool(
     // Try to unwrap a JSON envelope; if not JSON, return raw text.
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&stdout) {
         if let Some(text) = parsed.get("result").and_then(|v| v.as_str()) {
-            return Ok(CallToolResult::success(vec![Content::text(text.to_string())]));
+            return Ok(CallToolResult::success(vec![Content::text(
+                text.to_string(),
+            )]));
         }
         // Return pretty-printed JSON
         Ok(CallToolResult::success(vec![Content::text(
@@ -244,10 +248,7 @@ impl BrowserMcpServer {
         invoke_tool(&self.binary_path, "browser_set_viewport", &input).await
     }
 
-    #[tool(
-        name = "browser_navigate",
-        description = "Navigate to a specific URL"
-    )]
+    #[tool(name = "browser_navigate", description = "Navigate to a specific URL")]
     async fn browser_navigate(
         &self,
         Parameters(input): Parameters<BrowserNavigateInput>,
@@ -266,10 +267,7 @@ impl BrowserMcpServer {
         invoke_tool(&self.binary_path, "browser_screenshot", &input).await
     }
 
-    #[tool(
-        name = "browser_click",
-        description = "Click an element on the page"
-    )]
+    #[tool(name = "browser_click", description = "Click an element on the page")]
     async fn browser_click(
         &self,
         Parameters(input): Parameters<BrowserClickInput>,
@@ -277,10 +275,7 @@ impl BrowserMcpServer {
         invoke_tool(&self.binary_path, "browser_click", &input).await
     }
 
-    #[tool(
-        name = "browser_fill",
-        description = "Fill a form input with text"
-    )]
+    #[tool(name = "browser_fill", description = "Fill a form input with text")]
     async fn browser_fill(
         &self,
         Parameters(input): Parameters<BrowserFillInput>,
@@ -382,20 +377,19 @@ impl BrowserMcpServer {
 #[tool_handler]
 impl ServerHandler for BrowserMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
-        )
-        .with_server_info(Implementation::new("agent-browser-socket", env!("CARGO_PKG_VERSION")))
-        .with_instructions(
-            "MCP server for browser automation and API requests. \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "agent-browser-socket",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "MCP server for browser automation and API requests. \
              Browser tools: browser_navigate, browser_screenshot, browser_click, \
              browser_fill, browser_select, browser_hover, browser_evaluate, \
              browser_set_viewport. \
              API tools: api_get, api_post, api_put, api_patch, api_delete."
-                .to_string(),
-        )
+                    .to_string(),
+            )
     }
 }
 
@@ -410,9 +404,13 @@ pub async fn run_mcp_stdio() -> Result<i32, Box<dyn std::error::Error>> {
     let server = BrowserMcpServer::new(binary_path);
 
     let transport = stdio();
-    let service = server.serve(transport).await
+    let service = server
+        .serve(transport)
+        .await
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-    service.waiting().await
+    service
+        .waiting()
+        .await
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
     Ok(0)
@@ -421,9 +419,9 @@ pub async fn run_mcp_stdio() -> Result<i32, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::ffi::OsStr;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -495,9 +493,13 @@ mod tests {
     #[tokio::test]
     async fn invoke_tool_success_with_result_field() {
         let binary = create_mock_binary(r#"{"result":"ok"}"#, "", 0);
-        let result = invoke_tool(&binary, "browser_navigate", &serde_json::json!({"url":"https://example.com"}))
-            .await
-            .expect("invoke tool");
+        let result = invoke_tool(
+            &binary,
+            "browser_navigate",
+            &serde_json::json!({"url":"https://example.com"}),
+        )
+        .await
+        .expect("invoke tool");
 
         let value = result_json(&result);
         assert_eq!(value.get("isError").and_then(|v| v.as_bool()), Some(false));
@@ -507,9 +509,13 @@ mod tests {
     #[tokio::test]
     async fn invoke_tool_success_with_structured_json_stdout() {
         let binary = create_mock_binary(r#"{"answer":42}"#, "", 0);
-        let result = invoke_tool(&binary, "browser_evaluate", &serde_json::json!({"script":"1+1"}))
-            .await
-            .expect("invoke tool");
+        let result = invoke_tool(
+            &binary,
+            "browser_evaluate",
+            &serde_json::json!({"script":"1+1"}),
+        )
+        .await
+        .expect("invoke tool");
 
         let text = first_text(&result);
         assert!(text.contains("\"answer\": 42"));
@@ -518,9 +524,13 @@ mod tests {
     #[tokio::test]
     async fn invoke_tool_success_with_plain_text_stdout() {
         let binary = create_mock_binary("plain-output", "", 0);
-        let result = invoke_tool(&binary, "api_get", &serde_json::json!({"url":"https://example.com"}))
-            .await
-            .expect("invoke tool");
+        let result = invoke_tool(
+            &binary,
+            "api_get",
+            &serde_json::json!({"url":"https://example.com"}),
+        )
+        .await
+        .expect("invoke tool");
 
         assert_eq!(first_text(&result), "plain-output\n");
     }
@@ -528,9 +538,13 @@ mod tests {
     #[tokio::test]
     async fn invoke_tool_nonzero_exit_returns_error_result() {
         let binary = create_mock_binary("", "boom", 7);
-        let result = invoke_tool(&binary, "api_post", &serde_json::json!({"url":"https://example.com","data":"{}"}))
-            .await
-            .expect("invoke tool");
+        let result = invoke_tool(
+            &binary,
+            "api_post",
+            &serde_json::json!({"url":"https://example.com","data":"{}"}),
+        )
+        .await
+        .expect("invoke tool");
 
         let value = result_json(&result);
         assert_eq!(value.get("isError").and_then(|v| v.as_bool()), Some(true));
@@ -542,9 +556,13 @@ mod tests {
     #[tokio::test]
     async fn invoke_tool_spawn_failure_maps_to_mcp_error() {
         let bad_path = PathBuf::from(OsStr::new("/definitely/not/a/binary"));
-        let error = invoke_tool(&bad_path, "api_delete", &serde_json::json!({"url":"https://example.com"}))
-            .await
-            .expect_err("expected spawn failure");
+        let error = invoke_tool(
+            &bad_path,
+            "api_delete",
+            &serde_json::json!({"url":"https://example.com"}),
+        )
+        .await
+        .expect_err("expected spawn failure");
 
         let text = format!("{error}");
         assert!(text.contains("failed to spawn agent-browser"));
