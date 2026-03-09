@@ -5,18 +5,22 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 use socketioxide::extract::{Data, SocketRef};
+use socketioxide::socket::DisconnectReason;
 use socketioxide::SocketIo;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub struct AppState {
     pub binary_path: PathBuf,
     pub auth_url: Option<String>,
     pub http_client: reqwest::Client,
+    pub disconnect_tx: Option<mpsc::Sender<()>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,12 +65,35 @@ fn screenshot_response(
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     let (layer, io) = SocketIo::new_layer();
+    let client_connected = Arc::new(AtomicBool::new(false));
 
     io.ns("/", move |socket: SocketRef| {
         let state = state.clone();
+        let client_connected = client_connected.clone();
         async move {
+            if state.disconnect_tx.is_some()
+                && client_connected
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+            {
+                let _ = socket.disconnect();
+                return;
+            }
+
             let screenshot_state = state.clone();
             let command_state = state.clone();
+
+            if let Some(disconnect_tx) = state.disconnect_tx.clone() {
+                let disconnect_state = client_connected.clone();
+                socket.on_disconnect(move |_: DisconnectReason| {
+                    let disconnect_tx = disconnect_tx.clone();
+                    let disconnect_state = disconnect_state.clone();
+                    async move {
+                        disconnect_state.store(false, Ordering::SeqCst);
+                        let _ = disconnect_tx.send(()).await;
+                    }
+                });
+            }
 
             socket.on("health", |socket: SocketRef| async move {
                 let _ = socket.emit(

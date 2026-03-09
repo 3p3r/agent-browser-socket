@@ -7,12 +7,20 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::process::Stdio;
 use std::sync::Arc;
+use sysuri::UriScheme;
 use tokio::net::TcpListener;
 use tokio::process::Command;
+use tokio::sync::mpsc;
+use url::Url;
+
+const URI_SCHEME: &str = "abs";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliMode {
     Serve,
+    UriLaunch(String),
+    RegisterUri,
+    UnregisterUri,
     Version,
     Clean,
     Screenshot,
@@ -32,6 +40,20 @@ pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
         .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--mcp"));
     if mcp_mode {
         return CliMode::Mcp;
+    }
+
+    let register_uri = args
+        .iter()
+        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--register-uri"));
+    if register_uri {
+        return CliMode::RegisterUri;
+    }
+
+    let unregister_uri = args
+        .iter()
+        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--unregister-uri"));
+    if unregister_uri {
+        return CliMode::UnregisterUri;
     }
 
     let show_version = args
@@ -55,13 +77,72 @@ pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
 
     if show_version {
         CliMode::Version
+    } else if let Some(uri) = args
+        .iter()
+        .find_map(|arg| {
+            let candidate = arg.to_string_lossy();
+            if candidate.contains("://") {
+                Some(candidate.to_string())
+            } else {
+                None
+            }
+        })
+    {
+        CliMode::UriLaunch(uri)
     } else {
         CliMode::Serve
     }
 }
 
+fn register_uri_scheme() -> Result<(), Box<dyn Error>> {
+    let executable = std::env::current_exe()?;
+    let uri_scheme = UriScheme::new(URI_SCHEME, "Agent Browser Socket", executable);
+    sysuri::register(&uri_scheme)?;
+    Ok(())
+}
+
+fn ensure_uri_scheme_registered() -> Result<(), Box<dyn Error>> {
+    if !sysuri::is_registered(URI_SCHEME)? {
+        register_uri_scheme()?;
+    }
+
+    Ok(())
+}
+
+fn apply_uri_overrides(config: &mut AppConfig, uri: &str) -> Result<(), Box<dyn Error>> {
+    let parsed = Url::parse(uri)?;
+
+    if let Some(host) = parsed
+        .query_pairs()
+        .find_map(|(key, value)| (key == "host").then(|| value.into_owned()))
+    {
+        if !host.is_empty() {
+            config.host = host;
+        }
+    }
+
+    if let Some(port) = parsed
+        .query_pairs()
+        .find_map(|(key, value)| (key == "port").then(|| value.into_owned()))
+    {
+        config.port = port.parse::<u16>()?;
+    }
+
+    Ok(())
+}
+
 pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
     match parse_cli_mode(&args) {
+        CliMode::RegisterUri => {
+            register_uri_scheme()?;
+            println!("registered {}:// URI scheme", URI_SCHEME);
+            Ok(0)
+        }
+        CliMode::UnregisterUri => {
+            sysuri::unregister(URI_SCHEME)?;
+            println!("unregistered {}:// URI scheme", URI_SCHEME);
+            Ok(0)
+        }
         CliMode::Command(forwarded_args) => {
             if forwarded_args.is_empty() {
                 eprintln!("missing forwarded arguments after --command");
@@ -94,7 +175,25 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
         CliMode::Mcp => {
             crate::mcp::run_mcp_stdio().await
         }
+        CliMode::UriLaunch(uri) => {
+            ensure_uri_scheme_registered()?;
+
+            let mut config = load_config()?;
+            apply_uri_overrides(&mut config, &uri)?;
+
+            let (disconnect_tx, mut disconnect_rx) = mpsc::channel::<()>(1);
+            let shutdown = async move {
+                tokio::select! {
+                    _ = shutdown_signal() => {}
+                    _ = disconnect_rx.recv() => {}
+                }
+            };
+
+            run_server_with_shutdown_internal(config, shutdown, Some(disconnect_tx)).await?;
+            Ok(0)
+        }
         CliMode::Serve => {
+            ensure_uri_scheme_registered()?;
             let config = load_config()?;
             run_server_with_shutdown(config, shutdown_signal()).await?;
             Ok(0)
@@ -122,12 +221,24 @@ pub async fn run_server_with_shutdown<F>(config: AppConfig, shutdown: F) -> Resu
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    run_server_with_shutdown_internal(config, shutdown, None).await
+}
+
+async fn run_server_with_shutdown_internal<F>(
+    config: AppConfig,
+    shutdown: F,
+    disconnect_tx: Option<mpsc::Sender<()>>,
+) -> Result<(), Box<dyn Error>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
 
     let state = Arc::new(AppState {
         binary_path,
         auth_url: config.auth_url.clone(),
         http_client: reqwest::Client::new(),
+        disconnect_tx,
     });
 
     let app = build_router(state);
@@ -245,7 +356,41 @@ mod tests {
         assert_eq!(parse_cli_mode(&[OsString::from("--clean")]), CliMode::Clean);
         assert_eq!(parse_cli_mode(&[OsString::from("--screenshot")]), CliMode::Screenshot);
         assert_eq!(parse_cli_mode(&[OsString::from("--mcp")]), CliMode::Mcp);
+        assert_eq!(
+            parse_cli_mode(&[OsString::from("--register-uri")]),
+            CliMode::RegisterUri
+        );
+        assert_eq!(
+            parse_cli_mode(&[OsString::from("--unregister-uri")]),
+            CliMode::UnregisterUri
+        );
+        assert_eq!(
+            parse_cli_mode(&[OsString::from("abs://open?port=9876")]),
+            CliMode::UriLaunch("abs://open?port=9876".to_string())
+        );
         assert_eq!(parse_cli_mode(&[OsString::from("serve")]), CliMode::Serve);
+    }
+
+    #[test]
+    fn apply_uri_overrides_supports_partial_or_full_config() {
+        let mut config = AppConfig {
+            auth_url: None,
+            port: 9607,
+            host: "0.0.0.0".to_string(),
+            browser_path: None,
+        };
+
+        apply_uri_overrides(&mut config, "abs://open?port=7777").expect("port override");
+        assert_eq!(config.port, 7777);
+        assert_eq!(config.host, "0.0.0.0");
+
+        apply_uri_overrides(&mut config, "abs://open?port=8888&host=127.0.0.1").expect("full override");
+        assert_eq!(config.port, 8888);
+        assert_eq!(config.host, "127.0.0.1");
+
+        apply_uri_overrides(&mut config, "abs://localhost").expect("no host query override");
+        assert_eq!(config.port, 8888);
+        assert_eq!(config.host, "127.0.0.1");
     }
 
     #[tokio::test]

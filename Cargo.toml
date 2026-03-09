@@ -19,8 +19,10 @@ serde_json = "=1.0.145"
 secure-string = "0.3"
 shlex = "1"
 socketioxide = { version = "0.18", features = ["state", "extensions"] }
+sysuri = "0.4"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+url = "2"
 xcap = "0.4.1"
 base64 = "0.22"
 png = "0.17"

@@ -87,6 +87,12 @@ browser_path = "/usr/local/bin/agent-browser"
 # show wrapper version
 ./agent-browser-socket-linux --version
 
+# register abs:// URI scheme on this machine
+./agent-browser-socket-linux --register-uri
+
+# unregister abs:// URI scheme
+./agent-browser-socket-linux --unregister-uri
+
 # pass args directly to inner agent-browser
 ./agent-browser-socket-linux --command --version
 
@@ -96,6 +102,24 @@ browser_path = "/usr/local/bin/agent-browser"
 # capture desktop screenshots as JSON
 ./agent-browser-socket-linux --screenshot
 ```
+
+## URI launch mode (`abs://`)
+
+The app can be launched by OS URI handler after registration:
+
+- `abs://open?port=9911`
+- `abs://open?port=9911&host=127.0.0.1`
+
+URI query handling:
+
+- `port` is optional; if omitted, configured/default port is used.
+- `host` is optional; if omitted, configured/default host is used.
+
+Behavior in URI mode only:
+
+- server starts and waits for the first Socket.IO client
+- once the first client is connected, any additional client is disconnected immediately
+- when that connected client disconnects, the process exits automatically
 
 ## MCP mode (secondary)
 

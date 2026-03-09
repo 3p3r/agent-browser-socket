@@ -155,6 +155,7 @@ async fn start_main_server(auth_url: Option<String>) -> RunningServer {
         binary_path: create_mock_binary(),
         auth_url,
         http_client: reqwest::Client::new(),
+        disconnect_tx: None,
     });
 
     let app = build_router(state);
