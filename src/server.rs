@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -64,6 +65,10 @@ fn screenshot_response(
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     let (layer, io) = SocketIo::new_layer();
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
     let client_connected = Arc::new(AtomicBool::new(false));
 
     io.ns("/", move |socket: SocketRef| {
@@ -313,6 +318,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health_handler))
         .route("/version", get(version_handler))
         .layer(layer)
+        .layer(cors)
 }
 
 async fn health_handler() -> Json<serde_json::Value> {

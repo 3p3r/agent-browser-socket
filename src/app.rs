@@ -2,15 +2,26 @@ use crate::configuration::{load_config, AppConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
 use crate::screenshot::capture_all_screenshots;
 use crate::server::{build_router, AppState};
+use crossterm::cursor;
+use crossterm::execute;
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::prelude::*;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use std::error::Error;
 use std::ffi::OsString;
 use std::future::Future;
+use std::io::IsTerminal;
 use std::process::Stdio;
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 use sysuri::UriScheme;
 use tokio::net::TcpListener;
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc as tokio_mpsc;
 use url::Url;
 
 const URI_SCHEME: &str = "abs";
@@ -131,6 +142,142 @@ fn apply_uri_overrides(config: &mut AppConfig, uri: &str) -> Result<(), Box<dyn 
     Ok(())
 }
 
+struct IdleAnimationGuard {
+    stop_tx: mpsc::Sender<()>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl IdleAnimationGuard {
+    fn start(host: &str, port: u16) -> Option<Self> {
+        let tui_disabled = std::env::var("ABS_DISABLE_TUI")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+        if tui_disabled {
+            return None;
+        }
+
+        if !std::io::stdout().is_terminal() {
+            return None;
+        }
+
+        let host = host.to_string();
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let worker = thread::spawn(move || {
+            run_idle_animation_loop(&host, port, stop_rx);
+        });
+
+        Some(Self {
+            stop_tx,
+            worker: Some(worker),
+        })
+    }
+
+    fn stop(mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn run_idle_animation_loop(host: &str, port: u16, stop_rx: mpsc::Receiver<()>) {
+    let mut stdout = std::io::stdout();
+    if execute!(stdout, EnterAlternateScreen, cursor::Hide).is_err() {
+        return;
+    }
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(_) => {
+            return;
+        }
+    };
+
+    let start = Instant::now();
+    let spinner = ["◜", "◠", "◝", "◞", "◡", "◟"];
+    let pulse = [
+        "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃", "▂",
+    ];
+
+    loop {
+        if stop_rx.try_recv().is_ok() {
+            break;
+        }
+
+        let elapsed = start.elapsed();
+        let spinner_index = ((elapsed.as_millis() / 140) as usize) % spinner.len();
+        let pulse_index = ((elapsed.as_millis() / 90) as usize) % pulse.len();
+        let wave_offset = ((elapsed.as_millis() / 100) as usize) % pulse.len();
+        let wave = (0..24)
+            .map(|index| pulse[(index + wave_offset) % pulse.len()])
+            .collect::<String>();
+
+        let title = format!(" agent-browser-socket {} ", spinner[spinner_index]);
+        let subtitle = format!("Listening on {host}:{port}");
+        let uptime = format!("uptime {}s", elapsed.as_secs());
+        let energy = format!("{}{}{}", pulse[pulse_index], wave, pulse[pulse_index]);
+
+        if terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let card = centered_rect(area, 78, 9);
+
+                let status_lines = vec![
+                    Line::from(Span::styled(
+                        subtitle,
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        uptime,
+                        Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                    )),
+                    Line::from(Span::styled(
+                        energy,
+                        Style::default().fg(Color::Blue).add_modifier(Modifier::DIM),
+                    )),
+                ];
+
+                let paragraph = Paragraph::new(status_lines)
+                    .block(Block::default().borders(Borders::ALL).title(title))
+                    .alignment(Alignment::Center);
+
+                frame.render_widget(paragraph, card);
+            })
+            .is_err()
+        {
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(120));
+    }
+
+    let _ = terminal.show_cursor();
+    let _ = execute!(std::io::stdout(), LeaveAlternateScreen, cursor::Show);
+}
+
+fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(height.min(area.height)),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(((100 - width_percent) / 2).min(50)),
+            Constraint::Percentage(width_percent.min(100)),
+            Constraint::Percentage(((100 - width_percent) / 2).min(50)),
+        ])
+        .split(vertical[1])[1]
+}
+
 pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
     match parse_cli_mode(&args) {
         CliMode::RegisterUri => {
@@ -179,7 +326,7 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             let mut config = load_config()?;
             apply_uri_overrides(&mut config, &uri)?;
 
-            let (disconnect_tx, mut disconnect_rx) = mpsc::channel::<()>(1);
+            let (disconnect_tx, mut disconnect_rx) = tokio_mpsc::channel::<()>(1);
             let shutdown = async move {
                 tokio::select! {
                     _ = shutdown_signal() => {}
@@ -228,7 +375,7 @@ where
 async fn run_server_with_shutdown_internal<F>(
     config: AppConfig,
     shutdown: F,
-    disconnect_tx: Option<mpsc::Sender<()>>,
+    disconnect_tx: Option<tokio_mpsc::Sender<()>>,
 ) -> Result<(), Box<dyn Error>>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -245,15 +392,23 @@ where
     let app = build_router(state);
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
 
-    println!(
-        "agent-browser-socket listening on {}:{}",
-        config.host, config.port
-    );
+    let animation = IdleAnimationGuard::start(&config.host, config.port);
+    if animation.is_none() {
+        println!(
+            "agent-browser-socket listening on {}:{}",
+            config.host, config.port
+        );
+    }
 
-    axum::serve(listener, app)
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
-        .await?;
+        .await;
 
+    if let Some(animation) = animation {
+        animation.stop();
+    }
+
+    serve_result?;
     Ok(())
 }
 
