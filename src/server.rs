@@ -81,6 +81,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
             let screenshot_state = state.clone();
             let command_state = state.clone();
+            let shutdown_state = state.clone();
 
             if let Some(disconnect_tx) = state.disconnect_tx.clone() {
                 let disconnect_state = client_connected.clone();
@@ -110,6 +111,29 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                         "version": env!("CARGO_PKG_VERSION")
                     }),
                 );
+            });
+
+            socket.on("shutdown", move |socket: SocketRef| {
+                let state = shutdown_state.clone();
+                async move {
+                    if let Some(disconnect_tx) = state.disconnect_tx.clone() {
+                        let _ = socket.emit(
+                            "shutdown",
+                            &json!({
+                                "status": "closing"
+                            }),
+                        );
+                        let _ = disconnect_tx.send(()).await;
+                    } else {
+                        let _ = socket.emit(
+                            "error",
+                            &json!({
+                                "status": 403,
+                                "message": "shutdown is only available in URI launch mode"
+                            }),
+                        );
+                    }
+                }
             });
 
             socket.on(

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::process::Command;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone)]
 struct AuthState {
@@ -186,6 +186,33 @@ async fn start_main_server(auth_url: Option<String>) -> RunningServer {
         shutdown: Some(shutdown_tx),
         handle,
     }
+}
+
+async fn start_uri_mode_server() -> (String, tokio::task::JoinHandle<()>) {
+    let (disconnect_tx, mut disconnect_rx) = mpsc::channel::<()>(1);
+    let state = Arc::new(AppState {
+        binary_path: create_mock_binary(),
+        auth_url: None,
+        http_client: reqwest::Client::new(),
+        disconnect_tx: Some(disconnect_tx),
+    });
+
+    let app = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind uri mode server");
+    let port = listener.local_addr().expect("uri mode local addr").port();
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = disconnect_rx.recv().await;
+            })
+            .await;
+    });
+
+    (base_url, handle)
 }
 
 #[tokio::test]
@@ -446,4 +473,20 @@ async fn socket_screenshot_auth_200_forwards_headers_and_responds() {
             "screenshot event should return an array of monitor screenshots"
         );
     }
+}
+
+#[tokio::test]
+async fn socket_shutdown_event_closes_uri_mode_server() {
+    let (base_url, handle) = start_uri_mode_server().await;
+
+    let events = run_socket_client(&base_url, "shutdown", json!({})).await;
+
+    let shutdown_event = events
+        .iter()
+        .find(|entry| entry.get("event") == Some(&json!("shutdown")))
+        .expect("shutdown event missing");
+    assert_eq!(shutdown_event["data"]["status"], "closing");
+
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(3), handle).await;
+    assert!(joined.is_ok(), "server should exit after shutdown event");
 }

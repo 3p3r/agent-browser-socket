@@ -16,7 +16,7 @@ const socket = io(baseUrl, {
   transports: ["websocket", "polling"],
 });
 
-for (const name of ["health", "version", "stdout", "stderr", "exit", "error"]) {
+for (const name of ["health", "version", "shutdown", "stdout", "stderr", "exit", "error"]) {
   socket.on(name, (data) => {
     events.push({ event: name, data });
   });
