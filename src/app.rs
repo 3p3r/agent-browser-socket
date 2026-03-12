@@ -1,7 +1,7 @@
 use crate::configuration::{load_config, AppConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
 use crate::screenshot::capture_all_screenshots;
-use crate::server::{build_router, AppState};
+use crate::server::{build_router, AppState, URI_SCHEME};
 use coolor::Hsl;
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -28,8 +28,6 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::mpsc as tokio_mpsc;
 use url::Url;
-
-const URI_SCHEME: &str = "abs";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliMode {
@@ -112,13 +110,13 @@ pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
 
 fn register_uri_scheme() -> Result<(), Box<dyn Error>> {
     let executable = std::env::current_exe()?;
-    let uri_scheme = UriScheme::new(URI_SCHEME, "Agent Browser Socket", executable);
+    let uri_scheme = UriScheme::new(URI_SCHEME.unsecure(), "Agent Browser Socket", executable);
     sysuri::register(&uri_scheme)?;
     Ok(())
 }
 
 fn ensure_uri_scheme_registered() -> Result<(), Box<dyn Error>> {
-    if !sysuri::is_registered(URI_SCHEME)? {
+    if !sysuri::is_registered(URI_SCHEME.unsecure())? {
         register_uri_scheme()?;
     }
 
@@ -245,7 +243,7 @@ fn run_idle_animation_loop(
                         }
                     },
                     KeyCode::Char('u') | KeyCode::Char('U') => {
-                        match sysuri::unregister(URI_SCHEME) {
+                        match sysuri::unregister(URI_SCHEME.unsecure()) {
                             Ok(()) => {
                                 status_message =
                                     Some(("✓ URI scheme unregistered".to_string(), Instant::now()));
@@ -399,12 +397,12 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
     match parse_cli_mode(&args) {
         CliMode::RegisterUri => {
             register_uri_scheme()?;
-            println!("registered {}:// URI scheme", URI_SCHEME);
+            println!("registered {}:// URI scheme", URI_SCHEME.unsecure());
             Ok(0)
         }
         CliMode::UnregisterUri => {
-            sysuri::unregister(URI_SCHEME)?;
-            println!("unregistered {}:// URI scheme", URI_SCHEME);
+            sysuri::unregister(URI_SCHEME.unsecure())?;
+            println!("unregistered {}:// URI scheme", URI_SCHEME.unsecure());
             Ok(0)
         }
         CliMode::Command(forwarded_args) => {

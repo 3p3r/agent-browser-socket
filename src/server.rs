@@ -3,6 +3,8 @@ use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use once_cell::sync::Lazy;
+use secure_string::SecureString;
 use serde::Deserialize;
 use serde_json::json;
 use socketioxide::extract::{Data, SocketRef};
@@ -18,7 +20,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 
-const URI_SCHEME: &str = "abs";
+pub static URI_SCHEME: Lazy<SecureString> = Lazy::new(|| SecureString::from("abs"));
 
 #[derive(Clone)]
 pub struct AppState {
@@ -346,11 +348,11 @@ async fn register_uri_handler() -> (StatusCode, Json<serde_json::Value>) {
         }
     };
 
-    let uri_scheme = UriScheme::new(URI_SCHEME, "Agent Browser Socket", executable);
+    let uri_scheme = UriScheme::new(URI_SCHEME.unsecure(), "Agent Browser Socket", executable);
     match sysuri::register(&uri_scheme) {
         Ok(()) => (
             StatusCode::OK,
-            Json(json!({ "status": "registered", "scheme": URI_SCHEME })),
+            Json(json!({ "status": "registered", "scheme": URI_SCHEME.unsecure() })),
         ),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -360,10 +362,10 @@ async fn register_uri_handler() -> (StatusCode, Json<serde_json::Value>) {
 }
 
 async fn unregister_uri_handler() -> (StatusCode, Json<serde_json::Value>) {
-    match sysuri::unregister(URI_SCHEME) {
+    match sysuri::unregister(URI_SCHEME.unsecure()) {
         Ok(()) => (
             StatusCode::OK,
-            Json(json!({ "status": "unregistered", "scheme": URI_SCHEME })),
+            Json(json!({ "status": "unregistered", "scheme": URI_SCHEME.unsecure() })),
         ),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,

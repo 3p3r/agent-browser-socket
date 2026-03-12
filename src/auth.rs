@@ -1,9 +1,12 @@
 use axum::http::StatusCode;
+use once_cell::sync::Lazy;
 use reqwest::Client;
+use secure_string::SecureString;
 
-const HEADER_AUTHORIZATION: &str = "authorization";
-const HEADER_COOKIE: &str = "cookie";
-const HEADER_X_ORIGINAL_URI: &str = "x-original-uri";
+static HEADER_AUTHORIZATION: Lazy<SecureString> = Lazy::new(|| SecureString::from("authorization"));
+static HEADER_COOKIE: Lazy<SecureString> = Lazy::new(|| SecureString::from("cookie"));
+static HEADER_X_ORIGINAL_URI: Lazy<SecureString> =
+    Lazy::new(|| SecureString::from("x-original-uri"));
 
 pub async fn check_auth(
     client: &Client,
@@ -18,14 +21,14 @@ pub async fn check_auth(
     let mut request = client.get(url);
 
     if let Some(value) = authorization {
-        request = request.header(HEADER_AUTHORIZATION, value);
+        request = request.header(HEADER_AUTHORIZATION.unsecure(), value);
     }
 
     if let Some(value) = cookie {
-        request = request.header(HEADER_COOKIE, value);
+        request = request.header(HEADER_COOKIE.unsecure(), value);
     }
 
-    request = request.header(HEADER_X_ORIGINAL_URI, "/socket.io");
+    request = request.header(HEADER_X_ORIGINAL_URI.unsecure(), "/socket.io");
 
     let response = request
         .send()
