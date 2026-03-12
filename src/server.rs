@@ -1,6 +1,7 @@
 use crate::auth::check_auth;
 use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
-use axum::routing::get;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -11,10 +12,13 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use sysuri::UriScheme;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
+
+const URI_SCHEME: &str = "abs";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -317,6 +321,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/version", get(version_handler))
+        .route("/register-uri", post(register_uri_handler))
+        .route("/unregister-uri", post(unregister_uri_handler))
         .layer(layer)
         .layer(cors)
 }
@@ -327,6 +333,43 @@ async fn health_handler() -> Json<serde_json::Value> {
 
 async fn version_handler() -> Json<serde_json::Value> {
     Json(json!({ "version": env!("CARGO_PKG_VERSION") }))
+}
+
+async fn register_uri_handler() -> (StatusCode, Json<serde_json::Value>) {
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "status": "error", "message": error.to_string() })),
+            );
+        }
+    };
+
+    let uri_scheme = UriScheme::new(URI_SCHEME, "Agent Browser Socket", executable);
+    match sysuri::register(&uri_scheme) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "status": "registered", "scheme": URI_SCHEME })),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "status": "error", "message": error.to_string() })),
+        ),
+    }
+}
+
+async fn unregister_uri_handler() -> (StatusCode, Json<serde_json::Value>) {
+    match sysuri::unregister(URI_SCHEME) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "status": "unregistered", "scheme": URI_SCHEME })),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "status": "error", "message": error.to_string() })),
+        ),
+    }
 }
 
 fn build_args(payload: &CommandPayload) -> Result<Vec<String>, String> {

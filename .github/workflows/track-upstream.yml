@@ -30,7 +30,7 @@ jobs:
 
           release_json="$(gh api repos/vercel-labs/agent-browser/releases/latest)"
           latest_tag="$(printf '%s' "$release_json" | jq -r '.tag_name')"
-          pinned_tag="$(grep -oP 'const VERSION: &str = "\K[^"]+' build.rs)"
+          pinned_tag="$(grep -oP 'const VERSION: \&str = "\K[^"]+' build.rs)"
 
           required_assets=(
             "agent-browser-linux-x64"
@@ -77,7 +77,7 @@ jobs:
           LATEST_TAG: ${{ steps.compare.outputs.latest }}
         run: |
           set -euo pipefail
-          sed -i "s/^const VERSION: &str = \".*\";/const VERSION: &str = \"${LATEST_TAG}\";/" build.rs
+          sed -i "s/^const VERSION: \&str = \".*\";/const VERSION: \&str = \"${LATEST_TAG}\";/" build.rs
 
       - name: Commit and push version bump
         if: steps.compare.outputs.changed == 'true'

@@ -2,9 +2,13 @@ use crate::configuration::{load_config, AppConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
 use crate::screenshot::capture_all_screenshots;
 use crate::server::{build_router, AppState};
+use coolor::Hsl;
 use crossterm::cursor;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
@@ -19,6 +23,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use sysuri::UriScheme;
+use tachyonfx::{fx, Duration as FxDuration, Effect, Shader};
 use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -148,7 +153,7 @@ struct IdleAnimationGuard {
 }
 
 impl IdleAnimationGuard {
-    fn start(host: &str, port: u16) -> Option<Self> {
+    fn start(host: &str, port: u16, quit_tx: Option<tokio_mpsc::Sender<()>>) -> Option<Self> {
         let tui_disabled = std::env::var("ABS_DISABLE_TUI")
             .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or(false);
@@ -163,7 +168,7 @@ impl IdleAnimationGuard {
         let host = host.to_string();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let worker = thread::spawn(move || {
-            run_idle_animation_loop(&host, port, stop_rx);
+            run_idle_animation_loop(&host, port, stop_rx, quit_tx);
         });
 
         Some(Self {
@@ -180,9 +185,18 @@ impl IdleAnimationGuard {
     }
 }
 
-fn run_idle_animation_loop(host: &str, port: u16, stop_rx: mpsc::Receiver<()>) {
+fn run_idle_animation_loop(
+    host: &str,
+    port: u16,
+    stop_rx: mpsc::Receiver<()>,
+    quit_tx: Option<tokio_mpsc::Sender<()>>,
+) {
     let mut stdout = std::io::stdout();
+    if enable_raw_mode().is_err() {
+        return;
+    }
     if execute!(stdout, EnterAlternateScreen, cursor::Hide).is_err() {
+        let _ = disable_raw_mode();
         return;
     }
 
@@ -190,72 +204,175 @@ fn run_idle_animation_loop(host: &str, port: u16, stop_rx: mpsc::Receiver<()>) {
     let mut terminal = match Terminal::new(backend) {
         Ok(terminal) => terminal,
         Err(_) => {
+            let _ = disable_raw_mode();
             return;
         }
     };
 
     let start = Instant::now();
     let spinner = ["◜", "◠", "◝", "◞", "◡", "◟"];
-    let pulse = [
-        "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃", "▂",
-    ];
+    let mut status_message: Option<(String, Instant)> = None;
+    let mut wave_effect = create_wave_effect();
 
     loop {
         if stop_rx.try_recv().is_ok() {
             break;
         }
 
+        // Poll for keyboard events
+        if event::poll(Duration::from_millis(120)).unwrap_or(false) {
+            if let Ok(Event::Key(KeyEvent {
+                code, modifiers, ..
+            })) = event::read()
+            {
+                match code {
+                    KeyCode::Char('c') | KeyCode::Char('C')
+                        if modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if let Some(tx) = &quit_tx {
+                            let _ = tx.blocking_send(());
+                        }
+                        break;
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') => match register_uri_scheme() {
+                        Ok(()) => {
+                            status_message =
+                                Some(("✓ URI scheme registered".to_string(), Instant::now()));
+                        }
+                        Err(e) => {
+                            status_message =
+                                Some((format!("✗ Register failed: {}", e), Instant::now()));
+                        }
+                    },
+                    KeyCode::Char('u') | KeyCode::Char('U') => {
+                        match sysuri::unregister(URI_SCHEME) {
+                            Ok(()) => {
+                                status_message =
+                                    Some(("✓ URI scheme unregistered".to_string(), Instant::now()));
+                            }
+                            Err(e) => {
+                                status_message =
+                                    Some((format!("✗ Unregister failed: {}", e), Instant::now()));
+                            }
+                        }
+                    }
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                        if let Some(tx) = &quit_tx {
+                            let _ = tx.blocking_send(());
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Clear status message after 3 seconds
+        if let Some((_, timestamp)) = &status_message {
+            if timestamp.elapsed() > Duration::from_secs(3) {
+                status_message = None;
+            }
+        }
+
         let elapsed = start.elapsed();
         let spinner_index = ((elapsed.as_millis() / 140) as usize) % spinner.len();
-        let pulse_index = ((elapsed.as_millis() / 90) as usize) % pulse.len();
-        let wave_offset = ((elapsed.as_millis() / 100) as usize) % pulse.len();
-        let wave = (0..24)
-            .map(|index| pulse[(index + wave_offset) % pulse.len()])
-            .collect::<String>();
 
         let title = format!(" agent-browser-socket {} ", spinner[spinner_index]);
         let subtitle = format!("Listening on {host}:{port}");
         let uptime = format!("uptime {}s", elapsed.as_secs());
-        let energy = format!("{}{}{}", pulse[pulse_index], wave, pulse[pulse_index]);
 
         if terminal
             .draw(|frame| {
                 let area = frame.area();
-                let card = centered_rect(area, 78, 9);
+                let card = centered_rect(area, 78, 13);
 
-                let status_lines = vec![
+                let mut status_lines = vec![
                     Line::from(Span::styled(
-                        subtitle,
+                        subtitle.clone(),
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     )),
                     Line::from(Span::styled(
-                        uptime,
+                        uptime.clone(),
                         Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
                     )),
-                    Line::from(Span::styled(
-                        energy,
-                        Style::default().fg(Color::Blue).add_modifier(Modifier::DIM),
-                    )),
+                    Line::from(""),
                 ];
 
+                if let Some((msg, _)) = &status_message {
+                    let style = if msg.starts_with('✓') {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::Red)
+                    };
+                    status_lines.push(Line::from(Span::styled(msg.clone(), style)));
+                } else {
+                    status_lines.push(Line::from(""));
+                }
+
+                status_lines.push(Line::from(""));
+                status_lines.push(Line::from(Span::styled(
+                    "r=register  u=unregister  q/esc=quit",
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                )));
+
                 let paragraph = Paragraph::new(status_lines)
-                    .block(Block::default().borders(Borders::ALL).title(title))
+                    .block(Block::default().borders(Borders::ALL).title(title.clone()))
                     .alignment(Alignment::Center);
 
                 frame.render_widget(paragraph, card);
+
+                let wave_area = Rect {
+                    x: card.x + 2,
+                    y: card.y + 5,
+                    width: card.width.saturating_sub(4),
+                    height: 1,
+                };
+
+                render_wave_line(frame.buffer_mut(), wave_area, elapsed.as_secs_f32());
+
+                let fx_duration = FxDuration::from_millis(elapsed.as_millis() as u32);
+                wave_effect.process(fx_duration, frame.buffer_mut(), wave_area);
             })
             .is_err()
         {
             break;
         }
-
-        thread::sleep(Duration::from_millis(120));
     }
 
     let _ = terminal.show_cursor();
+    let _ = disable_raw_mode();
     let _ = execute!(std::io::stdout(), LeaveAlternateScreen, cursor::Show);
+}
+
+fn create_wave_effect() -> Effect {
+    fx::repeating(fx::hsl_shift_fg([60.0, 0.0, 0.0], 1000))
+}
+
+fn render_wave_line(buf: &mut ratatui::buffer::Buffer, area: Rect, time: f32) {
+    let wave_chars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    for x in 0..area.width {
+        let cell_x = area.x + x;
+        let cell_y = area.y;
+
+        if cell_x < buf.area.right() && cell_y < buf.area.bottom() {
+            let phase = (x as f32 * 0.5) + (time * 3.0);
+            let wave_value = (phase.sin() + 1.0) / 2.0;
+            let char_index = (wave_value * (wave_chars.len() - 1) as f32) as usize;
+            let char_index = char_index.min(wave_chars.len() - 1);
+
+            let hue = ((x as f32 / area.width as f32) * 360.0 + time * 60.0) % 360.0;
+            let hsl = Hsl::new(hue, 0.7, 0.6);
+            let rgb = hsl.to_rgb();
+            let color = Color::Rgb(rgb.r, rgb.g, rgb.b);
+
+            let cell = &mut buf[(cell_x, cell_y)];
+            cell.set_char(wave_chars[char_index]);
+            cell.set_fg(color);
+        }
+    }
 }
 
 fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
@@ -334,13 +451,22 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
                 }
             };
 
-            run_server_with_shutdown_internal(config, shutdown, Some(disconnect_tx)).await?;
+            run_server_with_shutdown_internal(config, shutdown, Some(disconnect_tx), None).await?;
             Ok(0)
         }
         CliMode::Serve => {
             ensure_uri_scheme_registered()?;
             let config = load_config()?;
-            run_server_with_shutdown(config, shutdown_signal()).await?;
+
+            let (quit_tx, mut quit_rx) = tokio_mpsc::channel::<()>(1);
+            let shutdown = async move {
+                tokio::select! {
+                    _ = shutdown_signal() => {}
+                    _ = quit_rx.recv() => {}
+                }
+            };
+
+            run_server_with_shutdown_internal(config, shutdown, None, Some(quit_tx)).await?;
             Ok(0)
         }
     }
@@ -362,20 +488,11 @@ pub async fn run_command_passthrough(
     Ok(status.code().unwrap_or(1))
 }
 
-pub async fn run_server_with_shutdown<F>(
-    config: AppConfig,
-    shutdown: F,
-) -> Result<(), Box<dyn Error>>
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    run_server_with_shutdown_internal(config, shutdown, None).await
-}
-
 async fn run_server_with_shutdown_internal<F>(
     config: AppConfig,
     shutdown: F,
     disconnect_tx: Option<tokio_mpsc::Sender<()>>,
+    quit_tx: Option<tokio_mpsc::Sender<()>>,
 ) -> Result<(), Box<dyn Error>>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -392,7 +509,7 @@ where
     let app = build_router(state);
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
 
-    let animation = IdleAnimationGuard::start(&config.host, config.port);
+    let animation = IdleAnimationGuard::start(&config.host, config.port, quit_tx);
     if animation.is_none() {
         println!(
             "agent-browser-socket listening on {}:{}",
@@ -410,6 +527,17 @@ where
 
     serve_result?;
     Ok(())
+}
+
+#[cfg(test)]
+pub async fn run_server_with_shutdown<F>(
+    config: AppConfig,
+    shutdown: F,
+) -> Result<(), Box<dyn Error>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    run_server_with_shutdown_internal(config, shutdown, None, None).await
 }
 
 pub async fn shutdown_signal() {
