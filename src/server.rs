@@ -10,6 +10,7 @@ use serde_json::json;
 use socketioxide::extract::{Data, SocketRef};
 use socketioxide::socket::DisconnectReason;
 use socketioxide::SocketIo;
+use std::error::Error as StdError;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +46,28 @@ pub struct ScreenshotPayload {
     pub cookie: Option<String>,
 }
 
+fn is_missing_uri_scheme_error(error: &(dyn StdError + 'static)) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("failed to find the scheme key")
+        || (message.contains("scheme") && message.contains("not found"))
+}
+
+pub fn unregister_uri_scheme() -> Result<bool, Box<dyn StdError>> {
+    if !sysuri::is_registered(URI_SCHEME.unsecure())? {
+        return Ok(false);
+    }
+
+    match sysuri::unregister(URI_SCHEME.unsecure()) {
+        Ok(()) => Ok(true),
+        Err(error) if is_missing_uri_scheme_error(&error) => Ok(false),
+        Err(error) => Err(Box::new(error)),
+    }
+}
+
 fn screenshot_response(
     screenshot_result: std::thread::Result<
         Result<Vec<ScreenshotResult>, Box<dyn std::error::Error>>,
@@ -69,17 +92,19 @@ fn screenshot_response(
     }
 }
 
-pub fn build_router(state: Arc<AppState>) -> Router {
+pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
     let (layer, io) = SocketIo::new_layer();
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
     let client_connected = Arc::new(AtomicBool::new(false));
+    let shutdown_io = io.clone();
 
     io.ns("/", move |socket: SocketRef| {
         let state = state.clone();
         let client_connected = client_connected.clone();
+        let shutdown_io = shutdown_io.clone();
         async move {
             if state.disconnect_tx.is_some()
                 && client_connected
@@ -126,6 +151,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
             socket.on("shutdown", move |socket: SocketRef| {
                 let state = shutdown_state.clone();
+                let shutdown_io = shutdown_io.clone();
                 async move {
                     if let Some(disconnect_tx) = state.disconnect_tx.clone() {
                         let _ = socket.emit(
@@ -134,6 +160,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                                 "status": "closing"
                             }),
                         );
+                        let _ = shutdown_io.disconnect().await;
                         let _ = disconnect_tx.send(()).await;
                     } else {
                         let _ = socket.emit(
@@ -320,13 +347,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         }
     });
 
-    Router::new()
-        .route("/health", get(health_handler))
-        .route("/version", get(version_handler))
-        .route("/register-uri", post(register_uri_handler))
-        .route("/unregister-uri", post(unregister_uri_handler))
-        .layer(layer)
-        .layer(cors)
+    (
+        Router::new()
+            .route("/health", get(health_handler))
+            .route("/version", get(version_handler))
+            .route("/register-uri", post(register_uri_handler))
+            .route("/unregister-uri", post(unregister_uri_handler))
+            .layer(layer)
+            .layer(cors),
+        io,
+    )
 }
 
 async fn health_handler() -> Json<serde_json::Value> {
@@ -362,10 +392,14 @@ async fn register_uri_handler() -> (StatusCode, Json<serde_json::Value>) {
 }
 
 async fn unregister_uri_handler() -> (StatusCode, Json<serde_json::Value>) {
-    match sysuri::unregister(URI_SCHEME.unsecure()) {
-        Ok(()) => (
+    match unregister_uri_scheme() {
+        Ok(true) => (
             StatusCode::OK,
             Json(json!({ "status": "unregistered", "scheme": URI_SCHEME.unsecure() })),
+        ),
+        Ok(false) => (
+            StatusCode::OK,
+            Json(json!({ "status": "already_unregistered", "scheme": URI_SCHEME.unsecure() })),
         ),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,

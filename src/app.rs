@@ -1,7 +1,7 @@
 use crate::configuration::{load_config, AppConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
 use crate::screenshot::capture_all_screenshots;
-use crate::server::{build_router, AppState, URI_SCHEME};
+use crate::server::{build_router, unregister_uri_scheme, AppState, URI_SCHEME};
 use coolor::Hsl;
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -242,18 +242,22 @@ fn run_idle_animation_loop(
                                 Some((format!("✗ Register failed: {}", e), Instant::now()));
                         }
                     },
-                    KeyCode::Char('u') | KeyCode::Char('U') => {
-                        match sysuri::unregister(URI_SCHEME.unsecure()) {
-                            Ok(()) => {
-                                status_message =
-                                    Some(("✓ URI scheme unregistered".to_string(), Instant::now()));
-                            }
-                            Err(e) => {
-                                status_message =
-                                    Some((format!("✗ Unregister failed: {}", e), Instant::now()));
-                            }
+                    KeyCode::Char('u') | KeyCode::Char('U') => match unregister_uri_scheme() {
+                        Ok(true) => {
+                            status_message =
+                                Some(("✓ URI scheme unregistered".to_string(), Instant::now()));
                         }
-                    }
+                        Ok(false) => {
+                            status_message = Some((
+                                "✓ URI scheme already unregistered".to_string(),
+                                Instant::now(),
+                            ));
+                        }
+                        Err(e) => {
+                            status_message =
+                                Some((format!("✗ Unregister failed: {}", e), Instant::now()));
+                        }
+                    },
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
                         if let Some(tx) = &quit_tx {
                             let _ = tx.blocking_send(());
@@ -401,8 +405,13 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             Ok(0)
         }
         CliMode::UnregisterUri => {
-            sysuri::unregister(URI_SCHEME.unsecure())?;
-            println!("unregistered {}:// URI scheme", URI_SCHEME.unsecure());
+            match unregister_uri_scheme()? {
+                true => println!("unregistered {}:// URI scheme", URI_SCHEME.unsecure()),
+                false => println!(
+                    "{}:// URI scheme already unregistered",
+                    URI_SCHEME.unsecure()
+                ),
+            }
             Ok(0)
         }
         CliMode::Command(forwarded_args) => {
@@ -504,7 +513,7 @@ where
         disconnect_tx,
     });
 
-    let app = build_router(state);
+    let (app, io) = build_router(state);
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
 
     let animation = IdleAnimationGuard::start(&config.host, config.port, quit_tx);
@@ -516,7 +525,10 @@ where
     }
 
     let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = io.disconnect().await;
+        })
         .await;
 
     if let Some(animation) = animation {

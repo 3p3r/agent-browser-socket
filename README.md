@@ -1,141 +1,103 @@
 # agent-browser-socket
 
-`agent-browser-socket` is a local bridge for web apps with browser-based agents.
+Swiss Army Knife tool that bridges web apps to browser automation via `agent-browser`.
 
-Primary use: your web app talks to this local Socket.IO server, and the server runs `agent-browser` on the same machine.
+Your web app connects to this server → server controls browser on your machine.
 
-This README is for users downloading the release binaries.
+---
 
-## Download
+## Quick Start
 
-Download from:
-
-[https://github.com/3p3r/agent-browser-socket/releases](https://github.com/3p3r/agent-browser-socket/releases)
-
-Then pick the file for your OS:
-
+**1. Download** from [releases](https://github.com/3p3r/agent-browser-socket/releases):
 - Linux: `agent-browser-socket-linux`
-- macOS: `agent-browser-socket-mac`
+- macOS: `agent-browser-socket-mac`  
 - Windows: `agent-browser-socket-windows.exe`
 
-Notes:
-
-- Linux binary is a self-extracting launcher that works on both `x86_64` and `aarch64`.
-- macOS binary is universal (`x86_64` + `aarch64`).
-- Linux builds target broad glibc compatibility (roughly `2.35+`).
-- Binaries are all 64 bit
-
-## Run (Socket.IO server)
-
-This is the main mode used by web apps.
-
-### Linux
+**2. Run:**
 
 ```bash
-chmod +x ./agent-browser-socket-linux
-./agent-browser-socket-linux
-```
+# Linux/macOS
+chmod +x ./agent-browser-socket-*
+./agent-browser-socket-*
 
-### macOS
-
-```bash
-chmod +x ./agent-browser-socket-mac
-./agent-browser-socket-mac
-```
-
-### Windows (PowerShell)
-
-```powershell
+# Windows
 .\agent-browser-socket-windows.exe
 ```
 
-Default server address: `http://0.0.0.0:9607`
+> **Mac users**: xattr -d com.apple.quarantine ./agent-browser-socket-mac to run the binary after downloading from the Internet.
 
-Health check:
+**3. Connect** to `http://localhost:9607`
 
-- `GET /health` → `{ "status": "ok" }`
-- `GET /version` → `{ "version": "<wrapper-version>" }`
+Check health: `GET /health` → `{"status": "ok"}`
 
-## Optional configuration
+---
 
-If you do nothing, defaults are used:
+## Configuration
 
-- `port = 9607`
-- `host = "0.0.0.0"`
-- `auth_url = null`
-- `browser_path = null`
+**Defaults** (no config needed):
+- Port: `9607`
+- Host: `0.0.0.0`
+- Auth: disabled
+- Browser: auto-downloaded
 
-Load order (last one wins):
-
-1. built-in defaults
-2. `~/.abs`
-3. `./.abs`
-4. `ABS_` environment variables
-
-Example `.abs` file:
+**Custom config** (optional) via `.abs` file or `ABS_*` env vars:
 
 ```toml
-auth_url = "http://127.0.0.1:8080/auth"
+# .abs or ~/.abs
 port = 9607
 host = "0.0.0.0"
+auth_url = "http://localhost:8080/auth"
 browser_path = "/usr/local/bin/agent-browser"
 ```
 
-## Useful binary flags
+**Priority:** Built-in → `~/.abs` → `./.abs` → `ABS_*` env vars
+
+---
+
+## Common Commands
 
 ```bash
-# show wrapper version
-./agent-browser-socket-linux --version
+# Show version
+./agent-browser-socket-* --version
 
-# register abs:// URI scheme on this machine
-./agent-browser-socket-linux --register-uri
+# Register abs:// URL handler
+./agent-browser-socket-* --register-uri
 
-# unregister abs:// URI scheme
-./agent-browser-socket-linux --unregister-uri
+# Pass commands to agent-browser
+./agent-browser-socket-* --command --version
 
-# pass args directly to inner agent-browser
-./agent-browser-socket-linux --command --version
+# Clean cached browser binary
+./agent-browser-socket-* --clean
 
-# delete cached embedded browser binary
-./agent-browser-socket-linux --clean
-
-# capture desktop screenshots as JSON
-./agent-browser-socket-linux --screenshot
+# Capture screenshots as JSON
+./agent-browser-socket-* --screenshot
 ```
 
-## URI launch mode (`abs://`)
+---
 
-The app can be launched by OS URI handler after registration:
+## Advanced Features
 
+### URI Launch Mode
+
+Register with `--register-uri`, then open URLs:
 - `abs://open?port=9911`
 - `abs://open?port=9911&host=127.0.0.1`
 
-URI query handling:
+**Behavior:** Auto-starts server, accepts one client, exits on disconnect.
 
-- `port` is optional; if omitted, configured/default port is used.
-- `host` is optional; if omitted, configured/default host is used.
+### MCP Mode
 
-Behavior in URI mode only:
-
-- server starts and waits for the first Socket.IO client
-- once the first client is connected, any additional client is disconnected immediately
-- when that connected client disconnects, the process exits automatically
-
-## MCP mode (secondary)
-
-Start as an MCP stdio server:
+Run as MCP stdio server:
 
 ```bash
-./agent-browser-socket-linux --mcp
+./agent-browser-socket-* --mcp
 ```
 
-Exposed MCP tools:
+**Available tools:**
+- Browser: `navigate`, `screenshot`, `click`, `fill`, `select`, `hover`, `evaluate`, `set_viewport`
+- API: `get`, `post`, `put`, `patch`, `delete`
 
-- Browser: `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_fill`, `browser_select`, `browser_hover`, `browser_evaluate`, `browser_set_viewport`
-- API: `api_get`, `api_post`, `api_put`, `api_patch`, `api_delete`
-
-Example MCP client config:
-
+**Client config:**
 ```json
 {
   "mcpServers": {
@@ -147,31 +109,33 @@ Example MCP client config:
 }
 ```
 
-## Socket.IO auth behavior (optional)
+### Auth Protection
 
-If `auth_url` is set, every `command` event runs an auth subrequest:
+Set `auth_url` to protect Socket.IO commands via auth subrequest:
 
-- `2xx`: command allowed
-- `401` / `403`: denied
-- any other status or network failure: error
+**Responses:**
+- `2xx` → allowed
+- `401`/`403` → denied
+- Other → error
 
-Forwarded headers:
+**Forwarded headers:** `Authorization`, `Cookie`, `X-Original-URI: /socket.io`
 
-- `Authorization`
-- `Cookie`
-- `X-Original-URI: /socket.io`
+---
 
-## For developers (optional)
+## Development
 
-If you are building from source:
+Build from source:
 
 ```bash
 cargo run
 cargo test
-cargo coverage
+cargo coverage  # outputs to coverage/
 ```
 
-Coverage outputs:
+---
 
-- `coverage/tarpaulin-report.html`
-- `coverage/lcov.info`
+## Platform Notes
+
+- Linux: Self-extracting, works on x86_64 and aarch64, glibc 2.35+
+- macOS: Universal binary (x86_64 + aarch64)
+- All binaries are 64-bit

@@ -165,7 +165,7 @@ async fn start_main_server(auth_url: Option<String>) -> RunningServer {
         disconnect_tx: None,
     });
 
-    let app = build_router(state);
+    let (app, _) = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind main server");
@@ -197,7 +197,7 @@ async fn start_uri_mode_server() -> (String, tokio::task::JoinHandle<()>) {
         disconnect_tx: Some(disconnect_tx),
     });
 
-    let app = build_router(state);
+    let (app, _) = build_router(state);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind uri mode server");
