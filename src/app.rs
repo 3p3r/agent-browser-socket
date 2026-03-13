@@ -1,7 +1,9 @@
 use crate::configuration::{load_config, AppConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
 use crate::screenshot::capture_all_screenshots;
-use crate::server::{build_router, unregister_uri_scheme, AppState, URI_SCHEME};
+use crate::server::{
+    build_router, unregister_uri_scheme, AppState, PageAgentRuntimeConfig, URI_SCHEME,
+};
 use coolor::Hsl;
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -40,6 +42,55 @@ pub enum CliMode {
     Screenshot,
     Mcp,
     Command(Vec<OsString>),
+}
+
+pub fn parse_page_agent_cli_config(args: &[OsString]) -> PageAgentRuntimeConfig {
+    let mut config = PageAgentRuntimeConfig::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].to_string_lossy();
+
+        if arg == "--page-agent-model" {
+            if let Some(value) = args.get(index + 1) {
+                config.model = value.to_string_lossy().to_string();
+                index += 1;
+            }
+        } else if arg == "--page-agent-url" {
+            if let Some(value) = args.get(index + 1) {
+                config.url = value.to_string_lossy().to_string();
+                index += 1;
+            }
+        } else if arg == "--page-agent-key" {
+            if let Some(value) = args.get(index + 1) {
+                config.key = value.to_string_lossy().to_string();
+                index += 1;
+            }
+        } else if let Some(value) = arg.strip_prefix("--page-agent-model=") {
+            config.model = value.to_string();
+        } else if let Some(value) = arg.strip_prefix("--page-agent-url=") {
+            config.url = value.to_string();
+        } else if let Some(value) = arg.strip_prefix("--page-agent-key=") {
+            config.key = value.to_string();
+        }
+
+        index += 1;
+    }
+
+    config
+}
+
+fn is_page_agent_flag_with_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--page-agent-model" | "--page-agent-url" | "--page-agent-key"
+    )
+}
+
+fn is_page_agent_inline_flag(arg: &str) -> bool {
+    arg.starts_with("--page-agent-model=")
+        || arg.starts_with("--page-agent-url=")
+        || arg.starts_with("--page-agent-key=")
 }
 
 pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
@@ -94,14 +145,32 @@ pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
 
     if show_version {
         CliMode::Version
-    } else if let Some(uri) = args.iter().find_map(|arg| {
-        let candidate = arg.to_string_lossy();
-        if candidate.contains("://") {
-            Some(candidate.to_string())
-        } else {
-            None
-        }
-    }) {
+    } else if let Some(uri) = {
+        let mut skip_next = false;
+        args.iter().find_map(|arg| {
+            let candidate = arg.to_string_lossy();
+
+            if skip_next {
+                skip_next = false;
+                return None;
+            }
+
+            if is_page_agent_flag_with_value(&candidate) {
+                skip_next = true;
+                return None;
+            }
+
+            if is_page_agent_inline_flag(&candidate) {
+                return None;
+            }
+
+            if candidate.contains("://") {
+                Some(candidate.to_string())
+            } else {
+                None
+            }
+        })
+    } {
         CliMode::UriLaunch(uri)
     } else {
         CliMode::Serve
@@ -422,6 +491,8 @@ fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
 }
 
 pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
+    let page_agent_config = parse_page_agent_cli_config(&args);
+
     match parse_cli_mode(&args) {
         CliMode::RegisterUri => {
             register_uri_scheme()?;
@@ -484,8 +555,14 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
                 }
             };
 
-            run_server_with_shutdown_internal(config, shutdown, Some(disconnect_tx), Some(quit_tx))
-                .await?;
+            run_server_with_shutdown_internal(
+                config,
+                page_agent_config,
+                shutdown,
+                Some(disconnect_tx),
+                Some(quit_tx),
+            )
+            .await?;
             Ok(0)
         }
         CliMode::Serve => {
@@ -500,7 +577,14 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
                 }
             };
 
-            run_server_with_shutdown_internal(config, shutdown, None, Some(quit_tx)).await?;
+            run_server_with_shutdown_internal(
+                config,
+                page_agent_config,
+                shutdown,
+                None,
+                Some(quit_tx),
+            )
+            .await?;
             Ok(0)
         }
     }
@@ -524,6 +608,7 @@ pub async fn run_command_passthrough(
 
 async fn run_server_with_shutdown_internal<F>(
     config: AppConfig,
+    page_agent_config: PageAgentRuntimeConfig,
     shutdown: F,
     disconnect_tx: Option<tokio_mpsc::Sender<()>>,
     quit_tx: Option<tokio_mpsc::Sender<()>>,
@@ -544,6 +629,7 @@ where
         binary_path,
         detected_browser_path: detected_browser_path.clone(),
         public_origin,
+        page_agent_config,
         auth_url: config.auth_url.clone(),
         http_client: reqwest::Client::new(),
         disconnect_tx,
@@ -590,7 +676,14 @@ pub async fn run_server_with_shutdown<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    run_server_with_shutdown_internal(config, shutdown, None, None).await
+    run_server_with_shutdown_internal(
+        config,
+        PageAgentRuntimeConfig::default(),
+        shutdown,
+        None,
+        None,
+    )
+    .await
 }
 
 pub async fn shutdown_signal() {
@@ -721,6 +814,36 @@ mod tests {
             CliMode::UriLaunch("abs://open?port=9876".to_string())
         );
         assert_eq!(parse_cli_mode(&[OsString::from("serve")]), CliMode::Serve);
+    }
+
+    #[test]
+    fn parse_cli_mode_ignores_page_agent_url_values_for_uri_detection() {
+        assert_eq!(
+            parse_cli_mode(&[
+                OsString::from("--page-agent-url"),
+                OsString::from("http://localhost:11434/v1")
+            ]),
+            CliMode::Serve
+        );
+        assert_eq!(
+            parse_cli_mode(&[OsString::from("--page-agent-url=http://localhost:11434/v1")]),
+            CliMode::Serve
+        );
+    }
+
+    #[test]
+    fn parse_page_agent_cli_config_supports_split_and_equals_forms() {
+        let parsed = parse_page_agent_cli_config(&[
+            OsString::from("--page-agent-model"),
+            OsString::from("my-model"),
+            OsString::from("--page-agent-url=http://127.0.0.1:5000/v1"),
+            OsString::from("--page-agent-key"),
+            OsString::from("secret-key"),
+        ]);
+
+        assert_eq!(parsed.model, "my-model");
+        assert_eq!(parsed.url, "http://127.0.0.1:5000/v1");
+        assert_eq!(parsed.key, "secret-key");
     }
 
     #[test]

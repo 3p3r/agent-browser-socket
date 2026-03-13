@@ -4,6 +4,7 @@ use crate::command_args::{
     ExecutablePathPrefill,
 };
 use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
+use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::StatusCode;
 use axum::response::Html;
@@ -38,11 +39,100 @@ const PAGE_AGENT_JS: &str = include_str!(concat!(
     "/node_modules/page-agent/dist/iife/page-agent.demo.js"
 ));
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageAgentRuntimeConfig {
+    pub model: String,
+    pub url: String,
+    pub key: String,
+}
+
+impl Default for PageAgentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            model: "qwen3.5-plus".to_string(),
+            url: "http://localhost:11434/v1".to_string(),
+            key: "NA".to_string(),
+        }
+    }
+}
+
+pub fn render_page_agent_bundle(config: &PageAgentRuntimeConfig) -> String {
+    let with_model = replace_js_string_constant(PAGE_AGENT_JS, "DEMO_MODEL", &config.model);
+    let with_url = replace_js_string_constant(&with_model, "DEMO_BASE_URL", &config.url);
+    replace_js_string_constant(&with_url, "DEMO_API_KEY", &config.key)
+}
+
+fn replace_js_string_constant(source: &str, constant_name: &str, replacement: &str) -> String {
+    let replacement_value =
+        serde_json::to_string(replacement).unwrap_or_else(|_| "\"\"".to_string());
+    let needle = format!("{constant_name}=");
+
+    let mut output = source.to_string();
+    let mut search_start = 0;
+
+    while let Some(relative_index) = output[search_start..].find(&needle) {
+        let name_index = search_start + relative_index;
+        let mut value_start = name_index + needle.len();
+
+        while value_start < output.len()
+            && output[value_start..]
+                .chars()
+                .next()
+                .map(|ch| ch.is_whitespace())
+                .unwrap_or(false)
+        {
+            value_start += output[value_start..]
+                .chars()
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(1);
+        }
+
+        let quote_char = match output[value_start..].chars().next() {
+            Some('"') => '"',
+            Some('\'') => '\'',
+            _ => {
+                search_start = value_start;
+                continue;
+            }
+        };
+
+        let content_start = value_start + quote_char.len_utf8();
+        let mut escaped = false;
+        let mut closing_quote = None;
+
+        for (offset, ch) in output[content_start..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote_char {
+                closing_quote = Some(content_start + offset);
+                break;
+            }
+        }
+
+        let Some(closing_quote) = closing_quote else {
+            break;
+        };
+
+        output.replace_range(value_start..=closing_quote, &replacement_value);
+        search_start = value_start + replacement_value.len();
+    }
+
+    output
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub binary_path: PathBuf,
     pub detected_browser_path: Option<PathBuf>,
     pub public_origin: String,
+    pub page_agent_config: PageAgentRuntimeConfig,
     pub auth_url: Option<String>,
     pub http_client: reqwest::Client,
     pub disconnect_tx: Option<mpsc::Sender<()>>,
@@ -131,6 +221,7 @@ fn build_page_agent_injection_script(public_origin: &str) -> String {
 }
 
 pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
+    let router_state = state.clone();
     let (layer, io) = SocketIo::new_layer();
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -482,7 +573,8 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
             .route("/register-uri", post(register_uri_handler))
             .route("/unregister-uri", post(unregister_uri_handler))
             .layer(layer)
-            .layer(cors),
+            .layer(cors)
+            .with_state(router_state),
         io,
     )
 }
@@ -501,11 +593,13 @@ async fn socket_io_client_handler() -> (
     )
 }
 
-async fn page_agent_handler() -> (
-    [(axum::http::header::HeaderName, &'static str); 1],
-    &'static str,
-) {
-    ([(CONTENT_TYPE, "application/javascript")], PAGE_AGENT_JS)
+async fn page_agent_handler(
+    State(state): State<Arc<AppState>>,
+) -> ([(axum::http::header::HeaderName, &'static str); 1], String) {
+    (
+        [(CONTENT_TYPE, "application/javascript")],
+        render_page_agent_bundle(&state.page_agent_config),
+    )
 }
 
 async fn health_handler() -> Json<serde_json::Value> {
@@ -615,5 +709,33 @@ mod tests {
             payload["message"],
             "screenshot failed: panic in capture backend"
         );
+    }
+
+    #[test]
+    fn render_page_agent_bundle_replaces_demo_constants_and_url() {
+        let config = PageAgentRuntimeConfig {
+            model: "my-model".to_string(),
+            url: "http://localhost:11434/v1".to_string(),
+            key: "my-key".to_string(),
+        };
+
+        let rendered = render_page_agent_bundle(&config);
+
+        assert!(rendered.contains("DEMO_MODEL=\"my-model\""));
+        assert!(rendered.contains("DEMO_BASE_URL=\"http://localhost:11434/v1\""));
+        assert!(rendered.contains("DEMO_API_KEY=\"my-key\""));
+        assert!(!rendered.contains("DEMO_BASE_URL=\"https://"));
+    }
+
+    #[test]
+    fn replace_js_string_constant_replaces_pattern_without_hardcoded_url() {
+        let source =
+            "const DEMO_MODEL=\"x\",DEMO_BASE_URL=\"https://example.invalid/demo\",DEMO_API_KEY=\"y\";";
+
+        let replaced =
+            replace_js_string_constant(source, "DEMO_BASE_URL", "http://localhost:11434/v1");
+
+        assert!(replaced.contains("DEMO_BASE_URL=\"http://localhost:11434/v1\""));
+        assert!(!replaced.contains("https://example.invalid/demo"));
     }
 }

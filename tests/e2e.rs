@@ -13,7 +13,7 @@ use axum::routing::any;
 use axum::{Json, Router};
 use serde_json::json;
 use serde_json::Value;
-use server::{build_router, AppState};
+use server::{build_router, AppState, PageAgentRuntimeConfig};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -168,6 +168,7 @@ async fn start_main_server(auth_url: Option<String>) -> RunningServer {
         binary_path: create_mock_binary(),
         detected_browser_path: Some(detected_browser_for_tests()),
         public_origin: "http://127.0.0.1".to_string(),
+        page_agent_config: PageAgentRuntimeConfig::default(),
         auth_url,
         http_client: reqwest::Client::new(),
         disconnect_tx: None,
@@ -202,6 +203,7 @@ async fn start_uri_mode_server() -> (String, tokio::task::JoinHandle<()>) {
         binary_path: create_mock_binary(),
         detected_browser_path: Some(detected_browser_for_tests()),
         public_origin: "http://127.0.0.1".to_string(),
+        page_agent_config: PageAgentRuntimeConfig::default(),
         auth_url: None,
         http_client: reqwest::Client::new(),
         disconnect_tx: Some(disconnect_tx),
@@ -285,6 +287,13 @@ async fn dashboard_uses_embedded_clients_and_asset_routes_are_served() {
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .contains("application/javascript"));
+
+    let page_agent_body = page_agent_response
+        .text()
+        .await
+        .expect("page-agent asset body");
+    assert!(page_agent_body.contains("DEMO_BASE_URL=\"http://localhost:11434/v1\""));
+    assert!(!page_agent_body.contains("DEMO_BASE_URL=\"https://"));
 
     server.stop().await;
 }

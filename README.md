@@ -101,6 +101,25 @@ The admin dashboard at `/` is fully self-hosted by this binary.
 - Page Agent demo script is served from `/assets/page-agent.demo.js`.
 - Dashboard HTML loads both embedded scripts directly (no CDN dependency).
 
+### Page Agent Runtime Flags
+
+Use these startup flags to control the embedded Page Agent bundle values served at `/assets/page-agent.demo.js`:
+
+- `--page-agent-model` (default: `qwen3.5-plus`)
+- `--page-agent-url` (default: `http://localhost:11434/v1`)
+- `--page-agent-key` (default: `NA`)
+
+Example:
+
+```bash
+./agent-browser-socket-* \
+  --page-agent-model qwen3.5-plus \
+  --page-agent-url http://localhost:11434/v1 \
+  --page-agent-key NA
+```
+
+The bundled upstream demo URL is replaced before the asset is served.
+
 ### MCP Mode
 
 Run as MCP stdio server:
