@@ -1,8 +1,13 @@
 # agent-browser-socket
 
-Swiss Army Knife tool that bridges web apps to browser automation via `agent-browser`.
+Swiss Army Knife tool that bridges web apps to browser automation via `agent-browser` and `page-agent`:
+
+- <https://github.com/alibaba/page-agent>
+- <https://github.com/vercel-labs/agent-browser>
 
 Your web app connects to this server → server controls browser on your machine.
+
+This project adds helpful automation features and a built-in admin dashboard to the core `agent-browser` experience, all in a single self-contained binary.
 
 ---
 
