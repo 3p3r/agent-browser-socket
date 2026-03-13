@@ -475,14 +475,17 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             apply_uri_overrides(&mut config, &uri)?;
 
             let (disconnect_tx, mut disconnect_rx) = tokio_mpsc::channel::<()>(1);
+            let (quit_tx, mut quit_rx) = tokio_mpsc::channel::<()>(1);
             let shutdown = async move {
                 tokio::select! {
                     _ = shutdown_signal() => {}
                     _ = disconnect_rx.recv() => {}
+                    _ = quit_rx.recv() => {}
                 }
             };
 
-            run_server_with_shutdown_internal(config, shutdown, Some(disconnect_tx), None).await?;
+            run_server_with_shutdown_internal(config, shutdown, Some(disconnect_tx), Some(quit_tx))
+                .await?;
             Ok(0)
         }
         CliMode::Serve => {
