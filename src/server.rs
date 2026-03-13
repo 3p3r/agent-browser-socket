@@ -2,6 +2,7 @@ use crate::auth::check_auth;
 use crate::command_args::{build_args, ensure_executable_path_arg, ExecutablePathPrefill};
 use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
 use axum::http::StatusCode;
+use axum::response::Html;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use once_cell::sync::Lazy;
@@ -23,6 +24,7 @@ use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 
 pub static URI_SCHEME: Lazy<SecureString> = Lazy::new(|| SecureString::from("abs"));
+const ADMIN_DASHBOARD_HTML: &str = include_str!("admin_dashboard.html");
 
 #[derive(Clone)]
 pub struct AppState {
@@ -365,6 +367,7 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
 
     (
         Router::new()
+            .route("/", get(dashboard_handler))
             .route("/health", get(health_handler))
             .route("/version", get(version_handler))
             .route("/register-uri", post(register_uri_handler))
@@ -373,6 +376,10 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
             .layer(cors),
         io,
     )
+}
+
+async fn dashboard_handler() -> Html<&'static str> {
+    Html(ADMIN_DASHBOARD_HTML)
 }
 
 async fn health_handler() -> Json<serde_json::Value> {

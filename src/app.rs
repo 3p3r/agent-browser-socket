@@ -292,7 +292,7 @@ fn run_idle_animation_loop(
         if terminal
             .draw(|frame| {
                 let area = frame.area();
-                let card = centered_rect(area, 78, 15);
+                let card = centered_rect(area, 78, 16);
 
                 let mut status_lines = vec![
                     Line::from(Span::styled(
@@ -333,6 +333,13 @@ fn run_idle_animation_loop(
                 };
                 status_lines.push(Line::from(Span::styled(
                     detected_line,
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                )));
+
+                let dashboard_host = if host == "0.0.0.0" { "localhost" } else { host };
+                let dashboard_line = format!("dashboard: http://{dashboard_host}:{port}/");
+                status_lines.push(Line::from(Span::styled(
+                    dashboard_line,
                     Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
                 )));
 
