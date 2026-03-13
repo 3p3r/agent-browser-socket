@@ -77,6 +77,14 @@ browser_path = "/usr/local/bin/agent-browser"
 
 ## Advanced Features
 
+### Browser Detection on Startup
+
+On launch, `agent-browser-socket` tries to detect a local Chrome-like browser path.
+
+- Detection order mirrors the upstream logic: default browser lookup, known install paths, then Desktop shortcuts.
+- In TUI mode, the detected path is shown below the keyboard shortcuts line.
+- Detection is best-effort and never blocks startup.
+
 ### URI Launch Mode
 
 Register with `--register-uri`, then open URLs:
@@ -96,6 +104,14 @@ Run as MCP stdio server:
 **Available tools:**
 
 `health`, `version`, `shutdown`, `screenshot_system`, `command`
+
+### Automatic `--executable-path` Prefill
+
+For Socket.IO `command` and MCP `command` calls:
+
+- If `--executable-path` is missing, the server appends `--executable-path=<detected_path>` automatically.
+- If the caller already passes `--executable-path` (either `--executable-path=/x` or `--executable-path /x`), the server does not override it.
+- If detection fails and no automatic `--executable-path` can be injected, run `agent-browser-socket --command install` to install a browser through this binary.
 
 **Client config:**
 ```json

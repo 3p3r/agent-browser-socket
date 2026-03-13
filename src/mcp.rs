@@ -3,7 +3,7 @@
 //! Launched via `agent-browser-socket --mcp`. Exposes system tools that mirror
 //! the Socket.IO server handlers over the Model Context Protocol using stdio transport.
 
-use crate::command_args::build_args;
+use crate::command_args::{build_args, ensure_executable_path_arg, ExecutablePathPrefill};
 use crate::configuration::load_config;
 use crate::embedded_binary::resolve_binary_path;
 use crate::screenshot::capture_all_screenshots;
@@ -40,14 +40,16 @@ pub struct CommandInput {
 #[derive(Clone)]
 pub struct SystemMcpServer {
     binary_path: PathBuf,
+    detected_browser_path: Option<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl SystemMcpServer {
-    pub fn new(binary_path: PathBuf) -> Self {
+    pub fn new(binary_path: PathBuf, detected_browser_path: Option<PathBuf>) -> Self {
         Self {
             binary_path,
+            detected_browser_path,
             tool_router: Self::tool_router(),
         }
     }
@@ -103,8 +105,11 @@ impl SystemMcpServer {
         &self,
         Parameters(input): Parameters<CommandInput>,
     ) -> Result<CallToolResult, McpError> {
-        let arguments = build_args(&input.command, &input.args)
+        let mut arguments = build_args(&input.command, &input.args)
             .map_err(|msg| McpError::invalid_params(msg, None))?;
+
+        let prefill =
+            ensure_executable_path_arg(&mut arguments, self.detected_browser_path.as_deref());
 
         let mut command = Command::new(&self.binary_path);
         command
@@ -125,10 +130,17 @@ impl SystemMcpServer {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
 
+        let install_hint = if prefill == ExecutablePathPrefill::Unavailable {
+            Some("executable path auto-detection unavailable; run `agent-browser-socket --command install` to install a browser through this binary")
+        } else {
+            None
+        };
+
         let result = serde_json::json!({
             "stdout": stdout,
             "stderr": stderr,
-            "exit_code": exit_code
+            "exit_code": exit_code,
+            "hint": install_hint
         });
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -171,7 +183,8 @@ impl ServerHandler for SystemMcpServer {
 pub async fn run_mcp_stdio() -> Result<i32, Box<dyn std::error::Error>> {
     let config = load_config()?;
     let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
-    let server = SystemMcpServer::new(binary_path);
+    let detected_browser_path = crate::browser_detection::find_chrome_browser();
+    let server = SystemMcpServer::new(binary_path, detected_browser_path);
 
     let transport = stdio();
     let service = server

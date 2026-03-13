@@ -1,5 +1,14 @@
 //! Shared command argument parsing utilities.
 
+use std::path::Path;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutablePathPrefill {
+    AlreadyProvided,
+    Injected,
+    Unavailable,
+}
+
 /// Parse command arguments from either an args array or a shell-quoted command string.
 ///
 /// Returns the parsed arguments on success, or an error message if neither args nor command
@@ -25,9 +34,29 @@ pub fn build_args(
     Err("provide non-empty args or command".to_string())
 }
 
+pub fn ensure_executable_path_arg(
+    args: &mut Vec<String>,
+    detected_browser_path: Option<&Path>,
+) -> ExecutablePathPrefill {
+    if args
+        .iter()
+        .any(|arg| arg == "--executable-path" || arg.starts_with("--executable-path="))
+    {
+        return ExecutablePathPrefill::AlreadyProvided;
+    }
+
+    if let Some(path) = detected_browser_path {
+        args.push(format!("--executable-path={}", path.to_string_lossy()));
+        return ExecutablePathPrefill::Injected;
+    }
+
+    ExecutablePathPrefill::Unavailable
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn build_args_prefers_args_over_command() {
@@ -61,5 +90,66 @@ mod tests {
         let result = build_args(&None, &None);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "provide non-empty args or command");
+    }
+
+    #[test]
+    fn ensure_executable_path_arg_appends_when_missing() {
+        let mut args = vec!["open".to_string(), "https://example.com".to_string()];
+        let detected = PathBuf::from("/detected/chrome");
+
+        let result = ensure_executable_path_arg(&mut args, Some(detected.as_path()));
+
+        assert_eq!(result, ExecutablePathPrefill::Injected);
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--executable-path=/detected/chrome"));
+    }
+
+    #[test]
+    fn ensure_executable_path_arg_does_not_override_equals_form() {
+        let mut args = vec![
+            "open".to_string(),
+            "--executable-path=/custom/browser".to_string(),
+        ];
+
+        let result = ensure_executable_path_arg(&mut args, Some(Path::new("/detected/chrome")));
+
+        assert_eq!(result, ExecutablePathPrefill::AlreadyProvided);
+        let count = args
+            .iter()
+            .filter(|arg| arg.starts_with("--executable-path"))
+            .count();
+        assert_eq!(count, 1);
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--executable-path=/custom/browser"));
+    }
+
+    #[test]
+    fn ensure_executable_path_arg_does_not_override_split_form() {
+        let mut args = vec![
+            "open".to_string(),
+            "--executable-path".to_string(),
+            "/custom/browser".to_string(),
+        ];
+
+        let result = ensure_executable_path_arg(&mut args, Some(Path::new("/detected/chrome")));
+
+        assert_eq!(result, ExecutablePathPrefill::AlreadyProvided);
+        let count = args
+            .iter()
+            .filter(|arg| arg.starts_with("--executable-path"))
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn ensure_executable_path_arg_noop_without_detected_path() {
+        let mut args = vec!["open".to_string()];
+
+        let result = ensure_executable_path_arg(&mut args, None);
+
+        assert_eq!(result, ExecutablePathPrefill::Unavailable);
+        assert_eq!(args, vec!["open"]);
     }
 }

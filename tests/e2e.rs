@@ -21,6 +21,10 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
+fn detected_browser_for_tests() -> PathBuf {
+    PathBuf::from("/detected/browser")
+}
+
 #[derive(Clone)]
 struct AuthState {
     status: StatusCode,
@@ -162,6 +166,7 @@ fn create_mock_binary() -> PathBuf {
 async fn start_main_server(auth_url: Option<String>) -> RunningServer {
     let state = Arc::new(AppState {
         binary_path: create_mock_binary(),
+        detected_browser_path: Some(detected_browser_for_tests()),
         auth_url,
         http_client: reqwest::Client::new(),
         disconnect_tx: None,
@@ -194,6 +199,7 @@ async fn start_uri_mode_server() -> (String, tokio::task::JoinHandle<()>) {
     let (disconnect_tx, mut disconnect_rx) = mpsc::channel::<()>(1);
     let state = Arc::new(AppState {
         binary_path: create_mock_binary(),
+        detected_browser_path: Some(detected_browser_for_tests()),
         auth_url: None,
         http_client: reqwest::Client::new(),
         disconnect_tx: Some(disconnect_tx),
@@ -261,12 +267,40 @@ async fn socket_command_emits_stdout_and_exit() {
         .collect();
     assert!(stdout_lines.iter().any(|line| line.contains("hello")));
     assert!(stdout_lines.iter().any(|line| line.contains("world")));
+    assert!(stdout_lines
+        .iter()
+        .any(|line| line.starts_with("--executable-path=/detected/browser")));
 
     let exit = events
         .iter()
         .find(|entry| entry.get("event") == Some(&json!("exit")))
         .expect("exit event missing");
     assert_eq!(exit["data"]["code"], 0);
+}
+
+#[tokio::test]
+async fn socket_command_does_not_override_user_executable_path() {
+    let server = start_main_server(None).await;
+    let events = run_socket_client(
+        &server.base_url,
+        "command",
+        json!({ "args": ["open", "--executable-path=/custom/browser"] }),
+    )
+    .await;
+    server.stop().await;
+
+    let stdout_lines: Vec<_> = events
+        .iter()
+        .filter(|entry| entry.get("event") == Some(&json!("stdout")))
+        .filter_map(|entry| entry["data"]["line"].as_str())
+        .collect();
+
+    assert!(stdout_lines
+        .iter()
+        .any(|line| line == &"--executable-path=/custom/browser"));
+    assert!(!stdout_lines
+        .iter()
+        .any(|line| line.starts_with("--executable-path=/detected/browser")));
 }
 
 #[tokio::test]

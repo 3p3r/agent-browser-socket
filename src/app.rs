@@ -151,7 +151,12 @@ struct IdleAnimationGuard {
 }
 
 impl IdleAnimationGuard {
-    fn start(host: &str, port: u16, quit_tx: Option<tokio_mpsc::Sender<()>>) -> Option<Self> {
+    fn start(
+        host: &str,
+        port: u16,
+        detected_browser_path: Option<String>,
+        quit_tx: Option<tokio_mpsc::Sender<()>>,
+    ) -> Option<Self> {
         let tui_disabled = std::env::var("ABS_DISABLE_TUI")
             .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or(false);
@@ -166,7 +171,7 @@ impl IdleAnimationGuard {
         let host = host.to_string();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let worker = thread::spawn(move || {
-            run_idle_animation_loop(&host, port, stop_rx, quit_tx);
+            run_idle_animation_loop(&host, port, detected_browser_path, stop_rx, quit_tx);
         });
 
         Some(Self {
@@ -186,6 +191,7 @@ impl IdleAnimationGuard {
 fn run_idle_animation_loop(
     host: &str,
     port: u16,
+    detected_browser_path: Option<String>,
     stop_rx: mpsc::Receiver<()>,
     quit_tx: Option<tokio_mpsc::Sender<()>>,
 ) {
@@ -286,7 +292,7 @@ fn run_idle_animation_loop(
         if terminal
             .draw(|frame| {
                 let area = frame.area();
-                let card = centered_rect(area, 78, 13);
+                let card = centered_rect(area, 78, 15);
 
                 let mut status_lines = vec![
                     Line::from(Span::styled(
@@ -316,6 +322,17 @@ fn run_idle_animation_loop(
                 status_lines.push(Line::from(""));
                 status_lines.push(Line::from(Span::styled(
                     "r=register  u=unregister  q/esc=quit",
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                )));
+
+                status_lines.push(Line::from(""));
+                let detected_line = match &detected_browser_path {
+                    Some(path) => format!("browser: {path}"),
+                    None => "browser: not found (run `agent-browser-socket --command install`)"
+                        .to_string(),
+                };
+                status_lines.push(Line::from(Span::styled(
+                    detected_line,
                     Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
                 )));
 
@@ -505,9 +522,11 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
+    let detected_browser_path = crate::browser_detection::find_chrome_browser();
 
     let state = Arc::new(AppState {
         binary_path,
+        detected_browser_path: detected_browser_path.clone(),
         auth_url: config.auth_url.clone(),
         http_client: reqwest::Client::new(),
         disconnect_tx,
@@ -516,7 +535,14 @@ where
     let (app, io) = build_router(state);
     let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
 
-    let animation = IdleAnimationGuard::start(&config.host, config.port, quit_tx);
+    let animation = IdleAnimationGuard::start(
+        &config.host,
+        config.port,
+        detected_browser_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        quit_tx,
+    );
     if animation.is_none() {
         println!(
             "agent-browser-socket listening on {}:{}",

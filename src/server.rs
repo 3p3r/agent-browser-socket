@@ -1,5 +1,5 @@
 use crate::auth::check_auth;
-use crate::command_args::build_args;
+use crate::command_args::{build_args, ensure_executable_path_arg, ExecutablePathPrefill};
 use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -27,6 +27,7 @@ pub static URI_SCHEME: Lazy<SecureString> = Lazy::new(|| SecureString::from("abs
 #[derive(Clone)]
 pub struct AppState {
     pub binary_path: PathBuf,
+    pub detected_browser_path: Option<PathBuf>,
     pub auth_url: Option<String>,
     pub http_client: reqwest::Client,
     pub disconnect_tx: Option<mpsc::Sender<()>>,
@@ -227,7 +228,7 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                         return;
                     }
 
-                    let arguments = match build_args(&payload.command, &payload.args) {
+                    let mut arguments = match build_args(&payload.command, &payload.args) {
                         Ok(arguments) => arguments,
                         Err(message) => {
                             let _ = socket.emit(
@@ -240,6 +241,20 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                             return;
                         }
                     };
+
+                    let prefill = ensure_executable_path_arg(
+                        &mut arguments,
+                        state.detected_browser_path.as_deref(),
+                    );
+
+                    if prefill == ExecutablePathPrefill::Unavailable {
+                        let _ = socket.emit(
+                            "stderr",
+                            &json!({
+                                "line": "executable path auto-detection unavailable; run `agent-browser-socket --command install` to install a browser through this binary"
+                            }),
+                        );
+                    }
 
                     let mut command = Command::new(&state.binary_path);
                     command
