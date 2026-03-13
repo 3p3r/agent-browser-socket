@@ -1,5 +1,7 @@
 #[path = "../src/auth.rs"]
 mod auth;
+#[path = "../src/command_args.rs"]
+mod command_args;
 #[path = "../src/screenshot.rs"]
 mod screenshot;
 #[path = "../src/server.rs"]

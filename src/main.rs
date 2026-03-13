@@ -1,5 +1,6 @@
 mod app;
 mod auth;
+mod command_args;
 mod configuration;
 mod embedded_binary;
 mod mcp;

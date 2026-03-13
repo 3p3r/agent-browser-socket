@@ -94,8 +94,8 @@ Run as MCP stdio server:
 ```
 
 **Available tools:**
-- Browser: `navigate`, `screenshot`, `click`, `fill`, `select`, `hover`, `evaluate`, `set_viewport`
-- API: `get`, `post`, `put`, `patch`, `delete`
+
+`health`, `version`, `shutdown`, `screenshot_system`, `command`
 
 **Client config:**
 ```json

@@ -1,4 +1,5 @@
 use crate::auth::check_auth;
+use crate::command_args::build_args;
 use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -226,7 +227,7 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                         return;
                     }
 
-                    let arguments = match build_args(&payload) {
+                    let arguments = match build_args(&payload.command, &payload.args) {
                         Ok(arguments) => arguments,
                         Err(message) => {
                             let _ = socket.emit(
@@ -406,24 +407,6 @@ async fn unregister_uri_handler() -> (StatusCode, Json<serde_json::Value>) {
             Json(json!({ "status": "error", "message": error.to_string() })),
         ),
     }
-}
-
-fn build_args(payload: &CommandPayload) -> Result<Vec<String>, String> {
-    if let Some(args) = &payload.args {
-        if !args.is_empty() {
-            return Ok(args.clone());
-        }
-    }
-
-    if let Some(command) = &payload.command {
-        if let Some(parsed) = shlex::split(command) {
-            if !parsed.is_empty() {
-                return Ok(parsed);
-            }
-        }
-    }
-
-    Err("provide non-empty args or command".to_string())
 }
 
 #[cfg(test)]
