@@ -53,6 +53,16 @@ pub fn ensure_executable_path_arg(
     ExecutablePathPrefill::Unavailable
 }
 
+pub fn strip_with_page_agent_flag(args: &mut Vec<String>) -> bool {
+    let initial_len = args.len();
+    args.retain(|arg| arg != "--with-page-agent");
+    args.len() != initial_len
+}
+
+pub fn is_open_command(args: &[String]) -> bool {
+    args.first().map(|arg| arg == "open").unwrap_or(false) && args.get(1).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +161,44 @@ mod tests {
 
         assert_eq!(result, ExecutablePathPrefill::Unavailable);
         assert_eq!(args, vec!["open"]);
+    }
+
+    #[test]
+    fn strip_with_page_agent_flag_removes_all_occurrences() {
+        let mut args = vec![
+            "open".to_string(),
+            "https://example.com".to_string(),
+            "--with-page-agent".to_string(),
+            "--with-page-agent".to_string(),
+        ];
+
+        let was_present = strip_with_page_agent_flag(&mut args);
+
+        assert!(was_present);
+        assert_eq!(args, vec!["open", "https://example.com"]);
+    }
+
+    #[test]
+    fn strip_with_page_agent_flag_noop_when_absent() {
+        let mut args = vec!["open".to_string(), "https://example.com".to_string()];
+
+        let was_present = strip_with_page_agent_flag(&mut args);
+
+        assert!(!was_present);
+        assert_eq!(args, vec!["open", "https://example.com"]);
+    }
+
+    #[test]
+    fn is_open_command_requires_open_and_url() {
+        assert!(is_open_command(&[
+            "open".to_string(),
+            "https://example.com".to_string()
+        ]));
+        assert!(!is_open_command(&["open".to_string()]));
+        assert!(!is_open_command(&[
+            "goto".to_string(),
+            "https://example.com".to_string()
+        ]));
+        assert!(!is_open_command(&[]));
     }
 }

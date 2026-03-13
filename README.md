@@ -93,6 +93,14 @@ Register with `--register-uri`, then open URLs:
 
 **Behavior:** Auto-starts server, accepts one client, exits on disconnect.
 
+### Embedded Admin Dashboard Assets
+
+The admin dashboard at `/` is fully self-hosted by this binary.
+
+- Socket.IO client is served from `/assets/socket.io.min.js`.
+- Page Agent demo script is served from `/assets/page-agent.demo.js`.
+- Dashboard HTML loads both embedded scripts directly (no CDN dependency).
+
 ### MCP Mode
 
 Run as MCP stdio server:
@@ -112,6 +120,15 @@ For Socket.IO `command` and MCP `command` calls:
 - If `--executable-path` is missing, the server appends `--executable-path=<detected_path>` automatically.
 - If the caller already passes `--executable-path` (either `--executable-path=/x` or `--executable-path /x`), the server does not override it.
 - If detection fails and no automatic `--executable-path` can be injected, run `agent-browser-socket --command install` to install a browser through this binary.
+
+### Synthetic `--with-page-agent` Flag
+
+For Socket.IO `command` and MCP `command` calls:
+
+- `--with-page-agent` is treated as a synthetic control flag and removed before forwarding args to `agent-browser`.
+- Page Agent injection runs via a follow-up `agent-browser eval` only after a successful `open <url>` command.
+- Injection is skipped for non-`open` commands even when `--with-page-agent` is present.
+- The injected script tag targets the embedded Page Agent asset route.
 
 **Client config:**
 ```json

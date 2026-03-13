@@ -167,6 +167,7 @@ async fn start_main_server(auth_url: Option<String>) -> RunningServer {
     let state = Arc::new(AppState {
         binary_path: create_mock_binary(),
         detected_browser_path: Some(detected_browser_for_tests()),
+        public_origin: "http://127.0.0.1".to_string(),
         auth_url,
         http_client: reqwest::Client::new(),
         disconnect_tx: None,
@@ -200,6 +201,7 @@ async fn start_uri_mode_server() -> (String, tokio::task::JoinHandle<()>) {
     let state = Arc::new(AppState {
         binary_path: create_mock_binary(),
         detected_browser_path: Some(detected_browser_for_tests()),
+        public_origin: "http://127.0.0.1".to_string(),
         auth_url: None,
         http_client: reqwest::Client::new(),
         disconnect_tx: Some(disconnect_tx),
@@ -247,6 +249,44 @@ async fn socket_version_event_returns_version() {
         .find(|entry| entry.get("event") == Some(&json!("version")))
         .expect("version event missing");
     assert!(version["data"]["version"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn dashboard_uses_embedded_clients_and_asset_routes_are_served() {
+    let server = start_main_server(None).await;
+    let dashboard_response = reqwest::get(format!("{}/", server.base_url))
+        .await
+        .expect("dashboard request");
+    assert_eq!(dashboard_response.status(), StatusCode::OK);
+    let dashboard_html = dashboard_response.text().await.expect("dashboard text");
+    assert!(dashboard_html.contains("/assets/socket.io.min.js"));
+    assert!(dashboard_html.contains("/assets/page-agent.demo.js"));
+
+    let socket_client_response =
+        reqwest::get(format!("{}/assets/socket.io.min.js", server.base_url))
+            .await
+            .expect("socket.io asset request");
+    assert_eq!(socket_client_response.status(), StatusCode::OK);
+    assert!(socket_client_response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .contains("application/javascript"));
+
+    let page_agent_response =
+        reqwest::get(format!("{}/assets/page-agent.demo.js", server.base_url))
+            .await
+            .expect("page-agent asset request");
+    assert_eq!(page_agent_response.status(), StatusCode::OK);
+    assert!(page_agent_response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .contains("application/javascript"));
+
+    server.stop().await;
 }
 
 #[tokio::test]

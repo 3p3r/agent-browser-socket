@@ -1,6 +1,10 @@
 use crate::auth::check_auth;
-use crate::command_args::{build_args, ensure_executable_path_arg, ExecutablePathPrefill};
+use crate::command_args::{
+    build_args, ensure_executable_path_arg, is_open_command, strip_with_page_agent_flag,
+    ExecutablePathPrefill,
+};
 use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
+use axum::http::header::CONTENT_TYPE;
 use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::{get, post};
@@ -25,11 +29,20 @@ use tower_http::cors::{Any, CorsLayer};
 
 pub static URI_SCHEME: Lazy<SecureString> = Lazy::new(|| SecureString::from("abs"));
 const ADMIN_DASHBOARD_HTML: &str = include_str!("admin_dashboard.html");
+const SOCKET_IO_CLIENT_JS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/node_modules/socket.io-client/dist/socket.io.min.js"
+));
+const PAGE_AGENT_JS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/node_modules/page-agent/dist/iife/page-agent.demo.js"
+));
 
 #[derive(Clone)]
 pub struct AppState {
     pub binary_path: PathBuf,
     pub detected_browser_path: Option<PathBuf>,
+    pub public_origin: String,
     pub auth_url: Option<String>,
     pub http_client: reqwest::Client,
     pub disconnect_tx: Option<mpsc::Sender<()>>,
@@ -94,6 +107,27 @@ fn screenshot_response(
             }),
         ),
     }
+}
+
+fn build_page_agent_injection_script(public_origin: &str) -> String {
+    let script_url = format!("{public_origin}/assets/page-agent.demo.js");
+    let serialized_script_url =
+        serde_json::to_string(&script_url).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"(() => new Promise((resolve, reject) => {{
+    const existing = document.querySelector('script[data-abs-page-agent="1"]');
+    if (existing) {{
+        resolve('already_loaded');
+        return;
+    }}
+    const script = document.createElement('script');
+    script.src = {serialized_script_url};
+    script.dataset.absPageAgent = '1';
+    script.onload = () => resolve('loaded');
+    script.onerror = () => reject(new Error('failed to load page-agent script'));
+    document.head.appendChild(script);
+}}))()"#
+    )
 }
 
 pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
@@ -244,6 +278,10 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                         }
                     };
 
+                    let with_page_agent = strip_with_page_agent_flag(&mut arguments);
+                    let should_inject_page_agent = with_page_agent && is_open_command(&arguments);
+                    let command_env = payload.env.clone();
+
                     let prefill = ensure_executable_path_arg(
                         &mut arguments,
                         state.detected_browser_path.as_deref(),
@@ -261,11 +299,11 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                     let mut command = Command::new(&state.binary_path);
                     command
                         .arg("--native")
-                        .args(arguments)
+                        .args(&arguments)
                         .stdout(Stdio::piped())
                         .stderr(Stdio::piped());
 
-                    if let Some(env) = payload.env {
+                    if let Some(env) = command_env.as_ref() {
                         command.envs(env);
                     }
 
@@ -359,6 +397,75 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                         }
                     }
 
+                    if should_inject_page_agent && exit_code == Some(0) {
+                        let _ = socket.emit(
+                            "stderr",
+                            &json!({ "line": "injecting page-agent after successful open" }),
+                        );
+
+                        let injection_script =
+                            build_page_agent_injection_script(&state.public_origin);
+                        let mut injection_command = Command::new(&state.binary_path);
+                        injection_command
+                            .arg("--native")
+                            .arg("eval")
+                            .arg(&injection_script)
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped());
+
+                        if let Some(env) = command_env.as_ref() {
+                            injection_command.envs(env);
+                        }
+
+                        match injection_command.output().await {
+                            Ok(output) => {
+                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                for line in stdout.lines() {
+                                    if !line.trim().is_empty() {
+                                        let _ = socket.emit(
+                                            "stdout",
+                                            &json!({ "line": format!("[page-agent] {line}") }),
+                                        );
+                                    }
+                                }
+
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                for line in stderr.lines() {
+                                    if !line.trim().is_empty() {
+                                        let _ = socket.emit(
+                                            "stderr",
+                                            &json!({ "line": format!("[page-agent] {line}") }),
+                                        );
+                                    }
+                                }
+
+                                if !output.status.success() {
+                                    let _ = socket.emit(
+                                        "error",
+                                        &json!({
+                                            "status": 500,
+                                            "message": format!(
+                                                "page-agent eval injection failed with exit code {}",
+                                                output.status.code().unwrap_or(-1)
+                                            )
+                                        }),
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                let _ = socket.emit(
+                                    "error",
+                                    &json!({
+                                        "status": 500,
+                                        "message": format!(
+                                            "failed to spawn page-agent eval injection: {error}"
+                                        )
+                                    }),
+                                );
+                            }
+                        }
+                    }
+
                     let _ = socket.emit("exit", &json!({ "code": exit_code.unwrap_or(-1) }));
                 }
             });
@@ -368,6 +475,8 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
     (
         Router::new()
             .route("/", get(dashboard_handler))
+            .route("/assets/socket.io.min.js", get(socket_io_client_handler))
+            .route("/assets/page-agent.demo.js", get(page_agent_handler))
             .route("/health", get(health_handler))
             .route("/version", get(version_handler))
             .route("/register-uri", post(register_uri_handler))
@@ -380,6 +489,23 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
 
 async fn dashboard_handler() -> Html<&'static str> {
     Html(ADMIN_DASHBOARD_HTML)
+}
+
+async fn socket_io_client_handler() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static str,
+) {
+    (
+        [(CONTENT_TYPE, "application/javascript")],
+        SOCKET_IO_CLIENT_JS,
+    )
+}
+
+async fn page_agent_handler() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    &'static str,
+) {
+    ([(CONTENT_TYPE, "application/javascript")], PAGE_AGENT_JS)
 }
 
 async fn health_handler() -> Json<serde_json::Value> {

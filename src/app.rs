@@ -533,10 +533,17 @@ where
 {
     let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
     let detected_browser_path = crate::browser_detection::find_chrome_browser();
+    let public_host = if config.host == "0.0.0.0" {
+        "localhost".to_string()
+    } else {
+        config.host.clone()
+    };
+    let public_origin = format!("http://{public_host}:{}", config.port);
 
     let state = Arc::new(AppState {
         binary_path,
         detected_browser_path: detected_browser_path.clone(),
+        public_origin,
         auth_url: config.auth_url.clone(),
         http_client: reqwest::Client::new(),
         disconnect_tx,

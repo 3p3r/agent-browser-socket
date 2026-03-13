@@ -3,7 +3,10 @@
 //! Launched via `agent-browser-socket --mcp`. Exposes system tools that mirror
 //! the Socket.IO server handlers over the Model Context Protocol using stdio transport.
 
-use crate::command_args::{build_args, ensure_executable_path_arg, ExecutablePathPrefill};
+use crate::command_args::{
+    build_args, ensure_executable_path_arg, is_open_command, strip_with_page_agent_flag,
+    ExecutablePathPrefill,
+};
 use crate::configuration::load_config;
 use crate::embedded_binary::resolve_binary_path;
 use crate::screenshot::capture_all_screenshots;
@@ -41,17 +44,44 @@ pub struct CommandInput {
 pub struct SystemMcpServer {
     binary_path: PathBuf,
     detected_browser_path: Option<PathBuf>,
+    public_origin: String,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl SystemMcpServer {
-    pub fn new(binary_path: PathBuf, detected_browser_path: Option<PathBuf>) -> Self {
+    pub fn new(
+        binary_path: PathBuf,
+        detected_browser_path: Option<PathBuf>,
+        public_origin: String,
+    ) -> Self {
         Self {
             binary_path,
             detected_browser_path,
+            public_origin,
             tool_router: Self::tool_router(),
         }
+    }
+
+    fn build_page_agent_injection_script(&self) -> String {
+        let script_url = format!("{}/assets/page-agent.demo.js", self.public_origin);
+        let serialized_script_url =
+            serde_json::to_string(&script_url).unwrap_or_else(|_| "\"\"".to_string());
+        format!(
+            r#"(() => new Promise((resolve, reject) => {{
+  const existing = document.querySelector('script[data-abs-page-agent="1"]');
+  if (existing) {{
+    resolve('already_loaded');
+    return;
+  }}
+  const script = document.createElement('script');
+  script.src = {serialized_script_url};
+  script.dataset.absPageAgent = '1';
+  script.onload = () => resolve('loaded');
+  script.onerror = () => reject(new Error('failed to load page-agent script'));
+  document.head.appendChild(script);
+}}))()"#
+        )
     }
 
     #[tool(name = "health", description = "Check server health status")]
@@ -108,6 +138,9 @@ impl SystemMcpServer {
         let mut arguments = build_args(&input.command, &input.args)
             .map_err(|msg| McpError::invalid_params(msg, None))?;
 
+        let with_page_agent = strip_with_page_agent_flag(&mut arguments);
+        let should_inject_page_agent = with_page_agent && is_open_command(&arguments);
+
         let prefill =
             ensure_executable_path_arg(&mut arguments, self.detected_browser_path.as_deref());
 
@@ -130,6 +163,35 @@ impl SystemMcpServer {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
 
+        let page_agent_injection = if should_inject_page_agent && exit_code == 0 {
+            let mut injection = Command::new(&self.binary_path);
+            injection
+                .arg("--native")
+                .arg("eval")
+                .arg(self.build_page_agent_injection_script())
+                .stdout(ProcessStdio::piped())
+                .stderr(ProcessStdio::piped());
+
+            if let Some(env) = &input.env {
+                injection.envs(env);
+            }
+
+            match injection.output().await {
+                Ok(injection_output) => Some(serde_json::json!({
+                    "stdout": String::from_utf8_lossy(&injection_output.stdout),
+                    "stderr": String::from_utf8_lossy(&injection_output.stderr),
+                    "exit_code": injection_output.status.code().unwrap_or(-1)
+                })),
+                Err(error) => Some(serde_json::json!({
+                    "stdout": "",
+                    "stderr": format!("failed to spawn page-agent eval injection: {error}"),
+                    "exit_code": -1
+                })),
+            }
+        } else {
+            None
+        };
+
         let install_hint = if prefill == ExecutablePathPrefill::Unavailable {
             Some("executable path auto-detection unavailable; run `agent-browser-socket --command install` to install a browser through this binary")
         } else {
@@ -140,7 +202,8 @@ impl SystemMcpServer {
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code,
-            "hint": install_hint
+            "hint": install_hint,
+            "page_agent_injection": page_agent_injection
         });
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -184,7 +247,13 @@ pub async fn run_mcp_stdio() -> Result<i32, Box<dyn std::error::Error>> {
     let config = load_config()?;
     let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
     let detected_browser_path = crate::browser_detection::find_chrome_browser();
-    let server = SystemMcpServer::new(binary_path, detected_browser_path);
+    let public_host = if config.host == "0.0.0.0" {
+        "localhost".to_string()
+    } else {
+        config.host.clone()
+    };
+    let public_origin = format!("http://{public_host}:{}", config.port);
+    let server = SystemMcpServer::new(binary_path, detected_browser_path, public_origin);
 
     let transport = stdio();
     let service = server
