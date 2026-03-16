@@ -603,8 +603,13 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
                     return Ok(2);
                 }
             };
-            let should_inject_page_agent =
-                translate_agentic_open(&mut forwarded_args) || prompt.is_some();
+            let should_inject_page_agent = match translate_agentic_open(&mut forwarded_args) {
+                Ok(opened) => opened || prompt.is_some(),
+                Err(message) => {
+                    eprintln!("{message}");
+                    return Ok(2);
+                }
+            };
 
             let config = load_config()?;
             let binary_path = resolve_binary_path(config.browser_path.as_deref())?;

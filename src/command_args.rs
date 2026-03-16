@@ -51,21 +51,22 @@ pub fn has_passthrough_command(args: &[String]) -> bool {
     args.iter().any(|arg| !arg.starts_with('-'))
 }
 
-pub fn translate_agentic_open(args: &mut [String]) -> bool {
+pub fn translate_agentic_open(args: &mut [String]) -> Result<bool, String> {
     if let Some(index) = args.iter().position(|arg| arg == "agentic-open") {
         if args.get(index + 1).is_some() {
             args[index] = "open".to_string();
-            return true;
+            return Ok(true);
         }
+        return Err("usage: agentic-open <url>".to_string());
     }
 
-    false
+    Ok(false)
 }
 
 pub fn translate_agentic_prompt(args: &mut Vec<String>) -> Result<Option<String>, String> {
     if let Some(index) = args.iter().position(|arg| arg == "agentic-prompt") {
         let Some(first_arg) = args.get(index + 1).cloned() else {
-            return Err("agentic-prompt requires a prompt".to_string());
+            return Err("usage: agentic-prompt [<url>] <prompt>".to_string());
         };
 
         let second_arg = args.get(index + 2).cloned();
@@ -73,7 +74,7 @@ pub fn translate_agentic_prompt(args: &mut Vec<String>) -> Result<Option<String>
 
         if first_looks_like_url {
             let Some(prompt) = second_arg else {
-                return Err("agentic-prompt requires a prompt".to_string());
+                return Err("usage: agentic-prompt <url> <prompt>\n  prompt is required when a URL is provided".to_string());
             };
             args[index] = "open".to_string();
             args[index + 1] = first_arg;
@@ -196,7 +197,7 @@ mod tests {
             "https://example.com".to_string(),
         ];
 
-        let should_inject = translate_agentic_open(&mut args);
+        let should_inject = translate_agentic_open(&mut args).unwrap();
 
         assert!(should_inject);
         assert_eq!(args, vec!["open", "https://example.com"]);
@@ -206,7 +207,7 @@ mod tests {
     fn translate_agentic_open_returns_false_for_plain_open() {
         let mut args = vec!["open".to_string(), "https://example.com".to_string()];
 
-        let should_inject = translate_agentic_open(&mut args);
+        let should_inject = translate_agentic_open(&mut args).unwrap();
 
         assert!(!should_inject);
         assert_eq!(args, vec!["open", "https://example.com"]);
@@ -215,11 +216,10 @@ mod tests {
     #[test]
     fn translate_agentic_open_requires_target_url() {
         let mut missing_url = vec!["agentic-open".to_string()];
-        assert!(!translate_agentic_open(&mut missing_url));
-        assert_eq!(missing_url, vec!["agentic-open"]);
+        assert!(translate_agentic_open(&mut missing_url).is_err());
 
         let mut unrelated = vec!["goto".to_string(), "https://example.com".to_string()];
-        assert!(!translate_agentic_open(&mut unrelated));
+        assert!(!translate_agentic_open(&mut unrelated).unwrap());
         assert_eq!(unrelated, vec!["goto", "https://example.com"]);
     }
 
@@ -231,7 +231,7 @@ mod tests {
             "https://example.com".to_string(),
         ];
 
-        let should_inject = translate_agentic_open(&mut args);
+        let should_inject = translate_agentic_open(&mut args).unwrap();
 
         assert!(should_inject);
         assert_eq!(args, vec!["--headed", "open", "https://example.com"]);

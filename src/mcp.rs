@@ -114,8 +114,9 @@ impl SystemMcpServer {
 
         let agentic_prompt = translate_agentic_prompt(&mut arguments)
             .map_err(|msg| McpError::invalid_params(msg, None))?;
-        let should_inject_page_agent =
-            translate_agentic_open(&mut arguments) || agentic_prompt.is_some();
+        let should_inject_page_agent = translate_agentic_open(&mut arguments)
+            .map_err(|msg| McpError::invalid_params(msg, None))?
+            || agentic_prompt.is_some();
 
         let prefill =
             ensure_executable_path_arg(&mut arguments, self.detected_browser_path.as_deref());

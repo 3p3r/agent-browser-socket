@@ -1,9 +1,13 @@
-# agent-browser-socket
+# agent-browser-socket (abs 💪)
 
-Swiss Army Knife tool that bridges web apps to browser automation via `agent-browser` and `page-agent`:
+Swiss Army Knife tool that bridges web apps to browser automation via [agent-browser](https://github.com/vercel-labs/agent-browser) and [page-agent](https://github.com/alibaba/page-agent):
 
-- <https://github.com/alibaba/page-agent>
-- <https://github.com/vercel-labs/agent-browser>
+```txt
+ [.____|____.]
+    [__|__]
+    [__|__]
+    [__|__]
+```
 
 Your web app connects to this server → server controls browser on your machine.
 
@@ -71,12 +75,23 @@ browser_path = "/usr/local/bin/agent-browser"
 # Pass commands to agent-browser
 ./agent-browser-socket-* --command --version
 
+# Open a URL with Page Agent injected
+./agent-browser-socket-* --verbose --command --headed agentic-open https://google.com
+
+# Open Google, inject Page Agent, and submit a prompt
+./agent-browser-socket-* --verbose --command --headed agentic-prompt https://google.com "search for rust async patterns"
+
+# Submit a prompt to Page Agent on the current page (no URL)
+./agent-browser-socket-* --verbose --command agentic-prompt "search for rust async patterns"
+
 # Clean cached browser binary
 ./agent-browser-socket-* --clean
 
 # Capture screenshots as JSON
 ./agent-browser-socket-* --screenshot
 ```
+
+`--verbose` shows browser stdout/stderr (suppressed by default). `--headed` opens a visible browser window.
 
 ---
 
@@ -123,7 +138,7 @@ Example:
   --page-agent-key NA
 ```
 
-The bundled upstream demo URL is replaced before the asset is served.
+Runtime constants are replaced when the asset is served.
 
 ### MCP Mode
 
@@ -147,14 +162,21 @@ For Socket.IO `command` and MCP `command` calls:
 
 ### Synthetic `agentic-open` Command
 
-For Socket.IO `command` and MCP `command` calls:
+Works across CLI (`--command`), Socket.IO, and MCP:
 
-- `agentic-open <url>` is treated as a synthetic command and translated to `open <url>` before forwarding to `agent-browser`.
-- Page Agent injection runs via a follow-up `agent-browser eval` only after a successful translated `open <url>` command.
-- Injection is skipped for all commands other than `agentic-open`.
-- The injected script tag targets the embedded Page Agent asset route.
+- `agentic-open <url>` translates to `open <url>` and injects Page Agent after a successful open.
+- In server mode (Socket.IO/MCP), injection loads the bundle via the embedded asset route.
+- In CLI mode (`--command`), injection uses chunked `eval` directly (no network requests).
 
-**Client config:**
+### Synthetic `agentic-prompt` Command
+
+Works across CLI (`--command`), Socket.IO, and MCP:
+
+- `agentic-prompt <url> <prompt>` — opens the URL, injects Page Agent, then submits the prompt.
+- `agentic-prompt <prompt>` — submits the prompt to Page Agent on the current page (no navigation). URLs are distinguished by containing `://` or starting with `about:`.
+- The prompt is typed into the Page Agent input and Enter is dispatched.
+
+**MCP client config:**
 ```json
 {
   "mcpServers": {
@@ -181,9 +203,10 @@ Set `auth_url` to protect Socket.IO commands via auth subrequest:
 
 ## Development
 
-Build from source:
+Requires the `page-agent` npm package (used at build time):
 
 ```bash
+npm install
 cargo run
 cargo test
 cargo coverage  # outputs to coverage/

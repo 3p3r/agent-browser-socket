@@ -412,8 +412,19 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                             return;
                         }
                     };
-                    let should_inject_page_agent =
-                        translate_agentic_open(&mut arguments) || agentic_prompt.is_some();
+                    let should_inject_page_agent = match translate_agentic_open(&mut arguments) {
+                        Ok(opened) => opened || agentic_prompt.is_some(),
+                        Err(message) => {
+                            let _ = socket.emit(
+                                "error",
+                                &json!({
+                                    "status": 400,
+                                    "message": message
+                                }),
+                            );
+                            return;
+                        }
+                    };
                     let command_env = payload.env.clone();
 
                     let prefill = ensure_executable_path_arg(
