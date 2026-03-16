@@ -10,7 +10,6 @@
     "format:js": "biome format --write",
     "build": "npm-run-all --parallel build:*",
     "build:rust": "cargo build --release",
-    "test": "npm-run-all --parallel test:*",
     "test:binary": "node tests/e2e-binary.mjs"
   },
   "dependencies": {

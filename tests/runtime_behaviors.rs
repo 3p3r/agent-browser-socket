@@ -288,6 +288,9 @@ fn configuration_uses_embedded_defaults_when_no_sources_exist() {
     assert_eq!(cfg.host, "0.0.0.0");
     assert!(cfg.auth_url.is_none());
     assert!(cfg.browser_path.is_none());
+    assert_eq!(cfg.page_agent.model, "qwen3.5-plus");
+    assert_eq!(cfg.page_agent.url, "http://localhost:11434/v1");
+    assert_eq!(cfg.page_agent.key, "NA");
 
     clear_abs_env();
 }
@@ -307,9 +310,15 @@ fn configuration_local_abs_file_overrides_home_and_defaults() {
     std::fs::create_dir_all(&home).expect("create home dir");
     std::fs::create_dir_all(&local).expect("create work dir");
 
-    std::fs::write(home.join(".abs"), "port = 9101\nhost = \"127.0.0.2\"\n")
+    std::fs::write(
+        home.join(".abs"),
+        "port = 9101\nhost = \"127.0.0.2\"\n[page_agent]\nmodel = \"home-model\"\nurl = \"http://home.local/v1\"\nkey = \"home-key\"\n",
+    )
         .expect("write home abs");
-    std::fs::write(local.join(".abs"), "port = 9999\nhost = \"127.0.0.9\"\n")
+    std::fs::write(
+        local.join(".abs"),
+        "port = 9999\nhost = \"127.0.0.9\"\n[page_agent]\nmodel = \"local-model\"\nurl = \"http://local.local/v1\"\nkey = \"local-key\"\n",
+    )
         .expect("write local abs");
 
     let _home_guard = EnvVarGuard::set("HOME", home.as_os_str());
@@ -318,6 +327,44 @@ fn configuration_local_abs_file_overrides_home_and_defaults() {
     let cfg = configuration::load_config().expect("load config from files");
     assert_eq!(cfg.port, 9999);
     assert_eq!(cfg.host, "127.0.0.9");
+    assert_eq!(cfg.page_agent.model, "local-model");
+    assert_eq!(cfg.page_agent.url, "http://local.local/v1");
+    assert_eq!(cfg.page_agent.key, "local-key");
+
+    clear_abs_env();
+}
+
+#[test]
+fn configuration_page_agent_env_overrides_file() {
+    let _guard = lock_env();
+    clear_abs_env();
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("abs-config-page-agent-env-{unique}"));
+    let home = root.join("home");
+    let local = root.join("work");
+    std::fs::create_dir_all(&home).expect("create home dir");
+    std::fs::create_dir_all(&local).expect("create work dir");
+
+    std::fs::write(
+        local.join(".abs"),
+        "[page_agent]\nmodel = \"file-model\"\nurl = \"http://file.local/v1\"\nkey = \"file-key\"\n",
+    )
+    .expect("write local abs");
+
+    let _home_guard = EnvVarGuard::set("HOME", home.as_os_str());
+    let _cwd = DirGuard::enter(&local);
+    let _model_guard = EnvVarGuard::set("ABS_PAGE_AGENT__MODEL", "env-model");
+    let _url_guard = EnvVarGuard::set("ABS_PAGE_AGENT__URL", "http://env.local/v1");
+    let _key_guard = EnvVarGuard::set("ABS_PAGE_AGENT__KEY", "env-key");
+
+    let cfg = configuration::load_config().expect("load config with env override");
+    assert_eq!(cfg.page_agent.model, "env-model");
+    assert_eq!(cfg.page_agent.url, "http://env.local/v1");
+    assert_eq!(cfg.page_agent.key, "env-key");
 
     clear_abs_env();
 }

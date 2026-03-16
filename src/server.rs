@@ -3,6 +3,7 @@ use crate::command_args::{
     build_args, ensure_executable_path_arg, has_passthrough_command, translate_agentic_open,
     translate_agentic_prompt, ExecutablePathPrefill,
 };
+use crate::configuration::PageAgentConfig;
 use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
@@ -36,24 +37,7 @@ const SOCKET_IO_CLIENT_JS: &str = include_str!(concat!(
 ));
 const PAGE_AGENT_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/page-agent.demo.sanitized.js"));
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PageAgentRuntimeConfig {
-    pub model: String,
-    pub url: String,
-    pub key: String,
-}
-
-impl Default for PageAgentRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            model: "qwen3.5-plus".to_string(),
-            url: "http://localhost:11434/v1".to_string(),
-            key: "NA".to_string(),
-        }
-    }
-}
-
-pub fn render_page_agent_bundle(config: &PageAgentRuntimeConfig) -> String {
+pub fn render_page_agent_bundle(config: &PageAgentConfig) -> String {
     let with_model = replace_js_string_constant(PAGE_AGENT_JS, "DEMO_MODEL", &config.model);
     let with_url = replace_js_string_constant(&with_model, "DEMO_BASE_URL", &config.url);
     replace_js_string_constant(&with_url, "DEMO_API_KEY", &config.key)
@@ -129,7 +113,7 @@ pub struct AppState {
     pub binary_path: PathBuf,
     pub detected_browser_path: Option<PathBuf>,
     pub public_origin: String,
-    pub page_agent_config: PageAgentRuntimeConfig,
+    pub page_agent_config: PageAgentConfig,
     pub auth_url: Option<String>,
     pub http_client: reqwest::Client,
     pub disconnect_tx: Option<mpsc::Sender<()>>,
@@ -833,7 +817,7 @@ mod tests {
 
     #[test]
     fn render_page_agent_bundle_replaces_demo_constants_and_url() {
-        let config = PageAgentRuntimeConfig {
+        let config = PageAgentConfig {
             model: "my-model".to_string(),
             url: "http://localhost:11434/v1".to_string(),
             key: "my-key".to_string(),

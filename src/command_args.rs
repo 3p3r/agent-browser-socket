@@ -48,7 +48,7 @@ pub fn ensure_executable_path_arg(
 }
 
 pub fn has_passthrough_command(args: &[String]) -> bool {
-    args.iter().any(|arg| !arg.starts_with('-'))
+    !args.is_empty()
 }
 
 pub fn translate_agentic_open(args: &mut [String]) -> Result<bool, String> {
@@ -140,6 +140,24 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "--executable-path=/detected/chrome"));
+    }
+
+    #[test]
+    fn has_passthrough_command_true_for_flag_only_args() {
+        let args = vec!["--version".to_string()];
+        assert!(has_passthrough_command(&args));
+    }
+
+    #[test]
+    fn has_passthrough_command_false_for_empty_args() {
+        let args: Vec<String> = vec![];
+        assert!(!has_passthrough_command(&args));
+    }
+
+    #[test]
+    fn has_passthrough_command_true_for_positional_args() {
+        let args = vec!["open".to_string(), "https://example.com".to_string()];
+        assert!(has_passthrough_command(&args));
     }
 
     #[test]

@@ -2,6 +2,8 @@
 mod auth;
 #[path = "../src/command_args.rs"]
 mod command_args;
+#[path = "../src/configuration.rs"]
+mod configuration;
 #[path = "../src/screenshot.rs"]
 mod screenshot;
 #[path = "../src/server.rs"]
@@ -11,9 +13,10 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::any;
 use axum::{Json, Router};
+use configuration::PageAgentConfig;
 use serde_json::json;
 use serde_json::Value;
-use server::{build_router, AppState, PageAgentRuntimeConfig};
+use server::{build_router, AppState};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -168,7 +171,7 @@ async fn start_main_server(auth_url: Option<String>) -> RunningServer {
         binary_path: create_mock_binary(),
         detected_browser_path: Some(detected_browser_for_tests()),
         public_origin: "http://127.0.0.1".to_string(),
-        page_agent_config: PageAgentRuntimeConfig::default(),
+        page_agent_config: PageAgentConfig::default(),
         auth_url,
         http_client: reqwest::Client::new(),
         disconnect_tx: None,
@@ -203,7 +206,7 @@ async fn start_uri_mode_server() -> (String, tokio::task::JoinHandle<()>) {
         binary_path: create_mock_binary(),
         detected_browser_path: Some(detected_browser_for_tests()),
         public_origin: "http://127.0.0.1".to_string(),
-        page_agent_config: PageAgentRuntimeConfig::default(),
+        page_agent_config: PageAgentConfig::default(),
         auth_url: None,
         http_client: reqwest::Client::new(),
         disconnect_tx: Some(disconnect_tx),

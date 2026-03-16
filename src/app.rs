@@ -1,12 +1,10 @@
 use crate::command_args::{
     has_passthrough_command, translate_agentic_open, translate_agentic_prompt,
 };
-use crate::configuration::{load_config, AppConfig};
+use crate::configuration::{load_config, AppConfig, PageAgentConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
 use crate::screenshot::capture_all_screenshots;
-use crate::server::{
-    build_router, unregister_uri_scheme, AppState, PageAgentRuntimeConfig, URI_SCHEME,
-};
+use crate::server::{build_router, unregister_uri_scheme, AppState, URI_SCHEME};
 use clap::{ArgAction, CommandFactory, Parser};
 use coolor::Hsl;
 use crossterm::cursor;
@@ -88,8 +86,8 @@ fn parse_cli_args(args: &[OsString]) -> Result<CliArgs, String> {
     })
 }
 
-pub fn parse_page_agent_cli_config(args: &[OsString]) -> PageAgentRuntimeConfig {
-    let mut config = PageAgentRuntimeConfig::default();
+pub fn build_page_agent_config(app_config: &AppConfig, args: &[OsString]) -> PageAgentConfig {
+    let mut config = app_config.page_agent.clone();
     let command_flag = OsString::from("--command");
     let parse_slice = if let Some(index) = args.iter().position(|arg| arg == &command_flag) {
         &args[..index]
@@ -184,7 +182,7 @@ fn parse_cli_verbose(args: &[OsString]) -> bool {
 
 async fn run_page_agent_injection(
     binary_path: &Path,
-    page_agent_config: &PageAgentRuntimeConfig,
+    page_agent_config: &PageAgentConfig,
 ) -> Result<i32, Box<dyn Error>> {
     use crate::server::render_page_agent_bundle;
 
@@ -571,7 +569,6 @@ fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
 }
 
 pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
-    let page_agent_config = parse_page_agent_cli_config(&args);
     let verbose = parse_cli_verbose(&args);
 
     match parse_cli_mode(&args) {
@@ -612,6 +609,7 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             };
 
             let config = load_config()?;
+            let page_agent_config = build_page_agent_config(&config, &args);
             let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
             let exit_code = if has_passthrough_command(&forwarded_args) {
                 run_command_passthrough(&binary_path, forwarded_args, verbose).await?
@@ -662,11 +660,16 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             println!("{}", serde_json::to_string(&screenshots)?);
             Ok(0)
         }
-        CliMode::Mcp => crate::mcp::run_mcp_stdio().await,
+        CliMode::Mcp => {
+            let config = load_config()?;
+            let page_agent_config = build_page_agent_config(&config, &args);
+            crate::mcp::run_mcp_stdio(config, page_agent_config).await
+        }
         CliMode::UriLaunch(uri) => {
             ensure_uri_scheme_registered()?;
 
             let mut config = load_config()?;
+            let page_agent_config = build_page_agent_config(&config, &args);
             apply_uri_overrides(&mut config, &uri)?;
 
             let (disconnect_tx, mut disconnect_rx) = tokio_mpsc::channel::<()>(1);
@@ -692,6 +695,7 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
         CliMode::Serve => {
             ensure_uri_scheme_registered()?;
             let config = load_config()?;
+            let page_agent_config = build_page_agent_config(&config, &args);
 
             let (quit_tx, mut quit_rx) = tokio_mpsc::channel::<()>(1);
             let shutdown = async move {
@@ -735,7 +739,7 @@ pub async fn run_command_passthrough(
 
 async fn run_server_with_shutdown_internal<F>(
     config: AppConfig,
-    page_agent_config: PageAgentRuntimeConfig,
+    page_agent_config: PageAgentConfig,
     shutdown: F,
     disconnect_tx: Option<tokio_mpsc::Sender<()>>,
     quit_tx: Option<tokio_mpsc::Sender<()>>,
@@ -803,14 +807,8 @@ pub async fn run_server_with_shutdown<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    run_server_with_shutdown_internal(
-        config,
-        PageAgentRuntimeConfig::default(),
-        shutdown,
-        None,
-        None,
-    )
-    .await
+    run_server_with_shutdown_internal(config, PageAgentConfig::default(), shutdown, None, None)
+        .await
 }
 
 pub async fn shutdown_signal() {
@@ -995,18 +993,43 @@ mod tests {
     }
 
     #[test]
-    fn parse_page_agent_cli_config_supports_split_and_equals_forms() {
-        let parsed = parse_page_agent_cli_config(&[
-            OsString::from("--page-agent-model"),
-            OsString::from("my-model"),
-            OsString::from("--page-agent-url=http://127.0.0.1:5000/v1"),
-            OsString::from("--page-agent-key"),
-            OsString::from("secret-key"),
-        ]);
+    fn build_page_agent_config_supports_split_and_equals_forms() {
+        let app_config = AppConfig::default();
+        let parsed = build_page_agent_config(
+            &app_config,
+            &[
+                OsString::from("--page-agent-model"),
+                OsString::from("my-model"),
+                OsString::from("--page-agent-url=http://127.0.0.1:5000/v1"),
+                OsString::from("--page-agent-key"),
+                OsString::from("secret-key"),
+            ],
+        );
 
         assert_eq!(parsed.model, "my-model");
         assert_eq!(parsed.url, "http://127.0.0.1:5000/v1");
         assert_eq!(parsed.key, "secret-key");
+    }
+
+    #[test]
+    fn build_page_agent_config_cli_overrides_loaded_config() {
+        let mut app_config = AppConfig::default();
+        app_config.page_agent.model = "env-model".to_string();
+        app_config.page_agent.url = "http://env.local/v1".to_string();
+        app_config.page_agent.key = "env-key".to_string();
+
+        let parsed = build_page_agent_config(
+            &app_config,
+            &[
+                OsString::from("--page-agent-model"),
+                OsString::from("cli-model"),
+                OsString::from("--page-agent-url=http://cli.local/v1"),
+            ],
+        );
+
+        assert_eq!(parsed.model, "cli-model");
+        assert_eq!(parsed.url, "http://cli.local/v1");
+        assert_eq!(parsed.key, "env-key");
     }
 
     #[test]
@@ -1028,6 +1051,7 @@ mod tests {
             port: 9607,
             host: "0.0.0.0".to_string(),
             browser_path: None,
+            page_agent: PageAgentConfig::default(),
         };
 
         apply_uri_overrides(&mut config, "abs://open?port=7777").expect("port override");
@@ -1162,6 +1186,7 @@ mod tests {
             port: 0,
             host: "127.0.0.1".to_string(),
             browser_path: Some(mock_browser.to_string_lossy().to_string()),
+            page_agent: PageAgentConfig::default(),
         };
 
         let result = run_server_with_shutdown(config, async {}).await;
@@ -1179,6 +1204,7 @@ mod tests {
             port: 9607,
             host: "256.256.256.256".to_string(),
             browser_path: Some(mock_browser.to_string_lossy().to_string()),
+            page_agent: PageAgentConfig::default(),
         };
 
         let result = run_server_with_shutdown(config, async {}).await;

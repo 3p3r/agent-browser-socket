@@ -9,7 +9,7 @@ Swiss Army Knife tool that bridges web apps to browser automation via [agent-bro
     [__|__]
 ```
 
-Your web app connects to this server → server controls browser on your machine.
+Your web app connects to `abs://` → `abs` controls browser on your machine.
 
 This project adds helpful automation features and a built-in admin dashboard to the core `agent-browser` experience, all in a single self-contained binary.
 
@@ -57,9 +57,21 @@ port = 9607
 host = "0.0.0.0"
 auth_url = "http://localhost:8080/auth"
 browser_path = "/usr/local/bin/agent-browser"
+
+[page_agent]
+model = "qwen3.5-plus"
+url = "http://localhost:11434/v1"
+key = "NA"
 ```
 
-**Priority:** Built-in → `~/.abs` → `./.abs` → `ABS_*` env vars
+For nested `page_agent` values via env vars, use:
+- `ABS_PAGE_AGENT__MODEL`
+- `ABS_PAGE_AGENT__URL`
+- `ABS_PAGE_AGENT__KEY`
+
+**Priority:** Built-in → `~/.abs` → `./.abs` → `ABS_*` env vars → CLI flags
+
+CLI flags always override file and env var configuration.
 
 ---
 
@@ -67,13 +79,13 @@ browser_path = "/usr/local/bin/agent-browser"
 
 ```bash
 # Show version
-./agent-browser-socket-* --version
+./agent-browser-socket-* --verbose --version
 
 # Register abs:// URL handler
 ./agent-browser-socket-* --register-uri
 
 # Pass commands to agent-browser
-./agent-browser-socket-* --command --version
+./agent-browser-socket-* --verbose --command --version
 
 # Open a URL with Page Agent injected
 ./agent-browser-socket-* --verbose --command --headed agentic-open https://google.com
@@ -139,6 +151,8 @@ Example:
 ```
 
 Runtime constants are replaced when the asset is served.
+
+These values can also be configured through `.abs` / `~/.abs` (`[page_agent]` table) or `ABS_PAGE_AGENT__*` env vars. CLI flags remain the highest priority.
 
 ### MCP Mode
 
