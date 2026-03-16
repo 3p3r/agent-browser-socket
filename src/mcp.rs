@@ -1,11 +1,6 @@
-//! MCP stdio server implementation.
-//!
-//! Launched via `agent-browser-socket --mcp`. Exposes system tools that mirror
-//! the Socket.IO server handlers over the Model Context Protocol using stdio transport.
-
 use crate::command_args::{
-    build_args, ensure_executable_path_arg, is_open_command, strip_with_page_agent_flag,
-    ExecutablePathPrefill,
+    build_args, ensure_executable_path_arg, has_passthrough_command, translate_agentic_open,
+    translate_agentic_prompt, ExecutablePathPrefill,
 };
 use crate::configuration::load_config;
 use crate::embedded_binary::resolve_binary_path;
@@ -63,27 +58,6 @@ impl SystemMcpServer {
         }
     }
 
-    fn build_page_agent_injection_script(&self) -> String {
-        let script_url = format!("{}/assets/page-agent.demo.js", self.public_origin);
-        let serialized_script_url =
-            serde_json::to_string(&script_url).unwrap_or_else(|_| "\"\"".to_string());
-        format!(
-            r#"(() => new Promise((resolve, reject) => {{
-  const existing = document.querySelector('script[data-abs-page-agent="1"]');
-  if (existing) {{
-    resolve('already_loaded');
-    return;
-  }}
-  const script = document.createElement('script');
-  script.src = {serialized_script_url};
-  script.dataset.absPageAgent = '1';
-  script.onload = () => resolve('loaded');
-  script.onerror = () => reject(new Error('failed to load page-agent script'));
-  document.head.appendChild(script);
-}}))()"#
-        )
-    }
-
     #[tool(name = "health", description = "Check server health status")]
     async fn health(&self) -> Result<CallToolResult, McpError> {
         Ok(CallToolResult::success(vec![Content::text(
@@ -138,37 +112,45 @@ impl SystemMcpServer {
         let mut arguments = build_args(&input.command, &input.args)
             .map_err(|msg| McpError::invalid_params(msg, None))?;
 
-        let with_page_agent = strip_with_page_agent_flag(&mut arguments);
-        let should_inject_page_agent = with_page_agent && is_open_command(&arguments);
+        let agentic_prompt = translate_agentic_prompt(&mut arguments)
+            .map_err(|msg| McpError::invalid_params(msg, None))?;
+        let should_inject_page_agent =
+            translate_agentic_open(&mut arguments) || agentic_prompt.is_some();
 
         let prefill =
             ensure_executable_path_arg(&mut arguments, self.detected_browser_path.as_deref());
 
-        let mut command = Command::new(&self.binary_path);
-        command
-            .arg("--native")
-            .args(&arguments)
-            .stdout(ProcessStdio::piped())
-            .stderr(ProcessStdio::piped());
+        let (stdout, stderr, exit_code) = if has_passthrough_command(&arguments) {
+            let mut command = Command::new(&self.binary_path);
+            command
+                .args(&arguments)
+                .stdout(ProcessStdio::piped())
+                .stderr(ProcessStdio::piped());
 
-        if let Some(env) = &input.env {
-            command.envs(env);
-        }
+            if let Some(env) = &input.env {
+                command.envs(env);
+            }
 
-        let output = command.output().await.map_err(|e| {
-            McpError::internal_error(format!("failed to spawn process: {}", e), None)
-        })?;
+            let output = command.output().await.map_err(|e| {
+                McpError::internal_error(format!("failed to spawn process: {}", e), None)
+            })?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
+            (
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+                output.status.code().unwrap_or(-1),
+            )
+        } else {
+            (String::new(), String::new(), 0)
+        };
 
         let page_agent_injection = if should_inject_page_agent && exit_code == 0 {
             let mut injection = Command::new(&self.binary_path);
             injection
-                .arg("--native")
                 .arg("eval")
-                .arg(self.build_page_agent_injection_script())
+                .arg(crate::server::build_page_agent_injection_script(
+                    &self.public_origin,
+                ))
                 .stdout(ProcessStdio::piped())
                 .stderr(ProcessStdio::piped());
 
@@ -177,11 +159,47 @@ impl SystemMcpServer {
             }
 
             match injection.output().await {
-                Ok(injection_output) => Some(serde_json::json!({
-                    "stdout": String::from_utf8_lossy(&injection_output.stdout),
-                    "stderr": String::from_utf8_lossy(&injection_output.stderr),
-                    "exit_code": injection_output.status.code().unwrap_or(-1)
-                })),
+                Ok(injection_output) => {
+                    let injection_exit = injection_output.status.code().unwrap_or(-1);
+                    let prompt_output = if injection_exit == 0 {
+                        if let Some(prompt) = agentic_prompt.as_ref() {
+                            let mut prompt_command = Command::new(&self.binary_path);
+                            prompt_command
+                                .arg("eval")
+                                .arg(crate::server::build_page_agent_prompt_script(prompt))
+                                .stdout(ProcessStdio::piped())
+                                .stderr(ProcessStdio::piped());
+
+                            if let Some(env) = &input.env {
+                                prompt_command.envs(env);
+                            }
+
+                            match prompt_command.output().await {
+                                Ok(prompt_result) => Some(serde_json::json!({
+                                    "stdout": String::from_utf8_lossy(&prompt_result.stdout),
+                                    "stderr": String::from_utf8_lossy(&prompt_result.stderr),
+                                    "exit_code": prompt_result.status.code().unwrap_or(-1)
+                                })),
+                                Err(error) => Some(serde_json::json!({
+                                    "stdout": "",
+                                    "stderr": format!("failed to spawn page-agent prompt eval: {error}"),
+                                    "exit_code": -1
+                                })),
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    Some(serde_json::json!({
+                        "stdout": String::from_utf8_lossy(&injection_output.stdout),
+                        "stderr": String::from_utf8_lossy(&injection_output.stderr),
+                        "exit_code": injection_exit,
+                        "prompt": prompt_output
+                    }))
+                }
                 Err(error) => Some(serde_json::json!({
                     "stdout": "",
                     "stderr": format!("failed to spawn page-agent eval injection: {error}"),

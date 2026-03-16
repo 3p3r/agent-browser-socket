@@ -1,7 +1,7 @@
 use crate::auth::check_auth;
 use crate::command_args::{
-    build_args, ensure_executable_path_arg, is_open_command, strip_with_page_agent_flag,
-    ExecutablePathPrefill,
+    build_args, ensure_executable_path_arg, has_passthrough_command, translate_agentic_open,
+    translate_agentic_prompt, ExecutablePathPrefill,
 };
 use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
 use axum::extract::State;
@@ -34,10 +34,7 @@ const SOCKET_IO_CLIENT_JS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/node_modules/socket.io-client/dist/socket.io.min.js"
 ));
-const PAGE_AGENT_JS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/node_modules/page-agent/dist/iife/page-agent.demo.js"
-));
+const PAGE_AGENT_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/page-agent.demo.sanitized.js"));
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageAgentRuntimeConfig {
@@ -199,24 +196,57 @@ fn screenshot_response(
     }
 }
 
-fn build_page_agent_injection_script(public_origin: &str) -> String {
+pub fn build_page_agent_injection_script(public_origin: &str) -> String {
     let script_url = format!("{public_origin}/assets/page-agent.demo.js");
     let serialized_script_url =
         serde_json::to_string(&script_url).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         r#"(() => new Promise((resolve, reject) => {{
-    const existing = document.querySelector('script[data-abs-page-agent="1"]');
-    if (existing) {{
+    if (window.PageAgent) {{
         resolve('already_loaded');
         return;
     }}
     const script = document.createElement('script');
     script.src = {serialized_script_url};
-    script.dataset.absPageAgent = '1';
-    script.onload = () => resolve('loaded');
+    script.onload = () => {{
+        if (!window.PageAgent) {{
+            reject(new Error('PageAgent not found on window after load'));
+            return;
+        }}
+        resolve('loaded');
+    }};
     script.onerror = () => reject(new Error('failed to load page-agent script'));
     document.head.appendChild(script);
 }}))()"#
+    )
+}
+
+pub fn build_page_agent_prompt_script(prompt: &str) -> String {
+    let serialized_prompt = serde_json::to_string(prompt).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"(() => {{
+    const input = document.querySelector('#page-agent-runtime_agent-panel input');
+    if (!input) throw new Error('page-agent input not found');
+
+    input.focus();
+    input.value = {serialized_prompt};
+    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+
+    const keyOptions = {{
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true,
+        composed: true
+    }};
+    input.dispatchEvent(new KeyboardEvent('keydown', keyOptions));
+    input.dispatchEvent(new KeyboardEvent('keypress', keyOptions));
+    input.dispatchEvent(new KeyboardEvent('keyup', keyOptions));
+
+    return 'submitted';
+}})()"#
     )
 }
 
@@ -369,8 +399,21 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                         }
                     };
 
-                    let with_page_agent = strip_with_page_agent_flag(&mut arguments);
-                    let should_inject_page_agent = with_page_agent && is_open_command(&arguments);
+                    let agentic_prompt = match translate_agentic_prompt(&mut arguments) {
+                        Ok(prompt) => prompt,
+                        Err(message) => {
+                            let _ = socket.emit(
+                                "error",
+                                &json!({
+                                    "status": 400,
+                                    "message": message
+                                }),
+                            );
+                            return;
+                        }
+                    };
+                    let should_inject_page_agent =
+                        translate_agentic_open(&mut arguments) || agentic_prompt.is_some();
                     let command_env = payload.env.clone();
 
                     let prefill = ensure_executable_path_arg(
@@ -387,101 +430,103 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                         );
                     }
 
-                    let mut command = Command::new(&state.binary_path);
-                    command
-                        .arg("--native")
-                        .args(&arguments)
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped());
+                    let mut exit_code: Option<i32> = Some(0);
+                    if has_passthrough_command(&arguments) {
+                        let mut command = Command::new(&state.binary_path);
+                        command
+                            .args(&arguments)
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped());
 
-                    if let Some(env) = command_env.as_ref() {
-                        command.envs(env);
-                    }
-
-                    let spawned = command.spawn();
-                    let mut child = match spawned {
-                        Ok(child) => child,
-                        Err(error) => {
-                            let _ = socket.emit(
-                                "error",
-                                &json!({
-                                    "status": 500,
-                                    "message": format!("failed to spawn process: {error}")
-                                }),
-                            );
-                            return;
-                        }
-                    };
-
-                    let mut stdout_lines = child.stdout.take().map(|stdout| BufReader::new(stdout).lines());
-                    let mut stderr_lines = child.stderr.take().map(|stderr| BufReader::new(stderr).lines());
-                    let mut wait_fut = Box::pin(child.wait());
-                    let mut exit_code: Option<i32> = None;
-
-                    loop {
-                        let stdout_done = stdout_lines.is_none();
-                        let stderr_done = stderr_lines.is_none();
-                        let process_done = exit_code.is_some();
-
-                        if stdout_done && stderr_done && process_done {
-                            break;
+                        if let Some(env) = command_env.as_ref() {
+                            command.envs(env);
                         }
 
-                        tokio::select! {
-                            status = &mut wait_fut, if exit_code.is_none() => {
-                                match status {
-                                    Ok(status) => {
-                                        exit_code = Some(status.code().unwrap_or(-1));
-                                    }
-                                    Err(error) => {
-                                        let _ = socket.emit(
-                                            "error",
-                                            &json!({
-                                                "status": 500,
-                                                "message": format!("process wait failed: {error}")
-                                            }),
-                                        );
-                                        return;
+                        let spawned = command.spawn();
+                        let mut child = match spawned {
+                            Ok(child) => child,
+                            Err(error) => {
+                                let _ = socket.emit(
+                                    "error",
+                                    &json!({
+                                        "status": 500,
+                                        "message": format!("failed to spawn process: {error}")
+                                    }),
+                                );
+                                return;
+                            }
+                        };
+
+                        let mut stdout_lines = child.stdout.take().map(|stdout| BufReader::new(stdout).lines());
+                        let mut stderr_lines = child.stderr.take().map(|stderr| BufReader::new(stderr).lines());
+                        let mut wait_fut = Box::pin(child.wait());
+                        exit_code = None;
+
+                        loop {
+                            let stdout_done = stdout_lines.is_none();
+                            let stderr_done = stderr_lines.is_none();
+                            let process_done = exit_code.is_some();
+
+                            if stdout_done && stderr_done && process_done {
+                                break;
+                            }
+
+                            tokio::select! {
+                                status = &mut wait_fut, if exit_code.is_none() => {
+                                    match status {
+                                        Ok(status) => {
+                                            exit_code = Some(status.code().unwrap_or(-1));
+                                        }
+                                        Err(error) => {
+                                            let _ = socket.emit(
+                                                "error",
+                                                &json!({
+                                                    "status": 500,
+                                                    "message": format!("process wait failed: {error}")
+                                                }),
+                                            );
+                                            return;
+                                        }
                                     }
                                 }
-                            }
-                            line = async { stdout_lines.as_mut().unwrap().next_line().await }, if stdout_lines.is_some() => {
-                                match line {
-                                    Ok(Some(line)) => {
-                                        let _ = socket.emit("stdout", &json!({ "line": line }));
-                                    }
-                                    Ok(None) => {
-                                        stdout_lines = None;
-                                    }
-                                    Err(error) => {
-                                        let _ = socket.emit(
-                                            "error",
-                                            &json!({
-                                                "status": 500,
-                                                "message": format!("stdout read failed: {error}")
-                                            }),
-                                        );
-                                        stdout_lines = None;
+                                line = async { stdout_lines.as_mut().unwrap().next_line().await }, if stdout_lines.is_some() => {
+                                    match line {
+                                        Ok(Some(line)) => {
+                                            let _ = socket.emit("stdout", &json!({ "line": line }));
+                                        }
+                                        Ok(None) => {
+                                            stdout_lines = None;
+                                        }
+                                        Err(error) => {
+                                            let _ = socket.emit(
+                                                "error",
+                                                &json!({
+                                                    "status": 500,
+                                                    "message": format!("stdout read failed: {error}")
+                                                }),
+                                            );
+                                            stdout_lines = None;
+                                        }
                                     }
                                 }
-                            }
-                            line = async { stderr_lines.as_mut().unwrap().next_line().await }, if stderr_lines.is_some() => {
-                                match line {
-                                    Ok(Some(line)) => {
-                                        let _ = socket.emit("stderr", &json!({ "line": line }));
-                                    }
-                                    Ok(None) => {
-                                        stderr_lines = None;
-                                    }
-                                    Err(error) => {
-                                        let _ = socket.emit(
-                                            "error",
-                                            &json!({
-                                                "status": 500,
-                                                "message": format!("stderr read failed: {error}")
-                                            }),
-                                        );
-                                        stderr_lines = None;
+                                line = async { stderr_lines.as_mut().unwrap().next_line().await }, if stderr_lines.is_some() => {
+                                    match line {
+                                        Ok(Some(line)) => {
+                                            let _ = socket.emit("stderr", &json!({ "line": line }));
+                                        }
+                                        Ok(None) => {
+                                            stderr_lines = None;
+                                        }
+                                        Err(error) => {
+                                            let _ = socket.emit(
+                                                "error",
+                                                &json!({
+                                                    "status": 500,
+                                                    "message": format!("stderr read failed: {error}")
+                                                }),
+                                            );
+                                            stderr_lines = None;
+                                        }
                                     }
                                 }
                             }
@@ -498,7 +543,6 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                             build_page_agent_injection_script(&state.public_origin);
                         let mut injection_command = Command::new(&state.binary_path);
                         injection_command
-                            .arg("--native")
                             .arg("eval")
                             .arg(&injection_script)
                             .stdout(Stdio::piped())
@@ -541,6 +585,71 @@ pub fn build_router(state: Arc<AppState>) -> (Router, SocketIo) {
                                             )
                                         }),
                                     );
+                                } else if let Some(prompt) = agentic_prompt.as_ref() {
+                                    let mut prompt_command = Command::new(&state.binary_path);
+                                    prompt_command
+                                        .arg("eval")
+                                        .arg(build_page_agent_prompt_script(prompt))
+                                        .stdout(Stdio::piped())
+                                        .stderr(Stdio::piped());
+
+                                    if let Some(env) = command_env.as_ref() {
+                                        prompt_command.envs(env);
+                                    }
+
+                                    match prompt_command.output().await {
+                                        Ok(prompt_output) => {
+                                            let prompt_stdout =
+                                                String::from_utf8_lossy(&prompt_output.stdout);
+                                            for line in prompt_stdout.lines() {
+                                                if !line.trim().is_empty() {
+                                                    let _ = socket.emit(
+                                                        "stdout",
+                                                        &json!({
+                                                            "line": format!("[page-agent] {line}")
+                                                        }),
+                                                    );
+                                                }
+                                            }
+
+                                            let prompt_stderr =
+                                                String::from_utf8_lossy(&prompt_output.stderr);
+                                            for line in prompt_stderr.lines() {
+                                                if !line.trim().is_empty() {
+                                                    let _ = socket.emit(
+                                                        "stderr",
+                                                        &json!({
+                                                            "line": format!("[page-agent] {line}")
+                                                        }),
+                                                    );
+                                                }
+                                            }
+
+                                            if !prompt_output.status.success() {
+                                                let _ = socket.emit(
+                                                    "error",
+                                                    &json!({
+                                                        "status": 500,
+                                                        "message": format!(
+                                                            "page-agent prompt eval failed with exit code {}",
+                                                            prompt_output.status.code().unwrap_or(-1)
+                                                        )
+                                                    }),
+                                                );
+                                            }
+                                        }
+                                        Err(error) => {
+                                            let _ = socket.emit(
+                                                "error",
+                                                &json!({
+                                                    "status": 500,
+                                                    "message": format!(
+                                                        "failed to spawn page-agent prompt eval: {error}"
+                                                    )
+                                                }),
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             Err(error) => {

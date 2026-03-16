@@ -1,9 +1,13 @@
+use crate::command_args::{
+    has_passthrough_command, translate_agentic_open, translate_agentic_prompt,
+};
 use crate::configuration::{load_config, AppConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
 use crate::screenshot::capture_all_screenshots;
 use crate::server::{
     build_router, unregister_uri_scheme, AppState, PageAgentRuntimeConfig, URI_SCHEME,
 };
+use clap::{ArgAction, CommandFactory, Parser};
 use coolor::Hsl;
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -19,6 +23,7 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::future::Future;
 use std::io::IsTerminal;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -31,6 +36,37 @@ use tokio::process::Command;
 use tokio::sync::mpsc as tokio_mpsc;
 use url::Url;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "agent-browser-socket",
+    disable_help_subcommand = true,
+    disable_version_flag = true
+)]
+struct CliArgs {
+    #[arg(long, action = ArgAction::SetTrue)]
+    mcp: bool,
+    #[arg(long, action = ArgAction::SetTrue)]
+    register_uri: bool,
+    #[arg(long, action = ArgAction::SetTrue)]
+    unregister_uri: bool,
+    #[arg(long, short = 'V', action = ArgAction::SetTrue)]
+    version: bool,
+    #[arg(long, action = ArgAction::SetTrue)]
+    clean: bool,
+    #[arg(long, action = ArgAction::SetTrue)]
+    screenshot: bool,
+    #[arg(long, action = ArgAction::SetTrue)]
+    verbose: bool,
+    #[arg(long)]
+    page_agent_model: Option<String>,
+    #[arg(long)]
+    page_agent_url: Option<String>,
+    #[arg(long)]
+    page_agent_key: Option<String>,
+    #[arg()]
+    input: Option<OsString>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliMode {
     Serve,
@@ -41,140 +77,184 @@ pub enum CliMode {
     Clean,
     Screenshot,
     Mcp,
-    Command(Vec<OsString>),
+    Command(Vec<String>),
+}
+
+fn parse_cli_args(args: &[OsString]) -> Result<CliArgs, String> {
+    let argv = std::iter::once(OsString::from("agent-browser-socket")).chain(args.iter().cloned());
+    CliArgs::try_parse_from(argv).map_err(|error| {
+        let mut command = CliArgs::command();
+        error.format(&mut command).to_string()
+    })
 }
 
 pub fn parse_page_agent_cli_config(args: &[OsString]) -> PageAgentRuntimeConfig {
     let mut config = PageAgentRuntimeConfig::default();
-    let mut index = 0;
+    let command_flag = OsString::from("--command");
+    let parse_slice = if let Some(index) = args.iter().position(|arg| arg == &command_flag) {
+        &args[..index]
+    } else {
+        args
+    };
 
-    while index < args.len() {
-        let arg = args[index].to_string_lossy();
-
-        if arg == "--page-agent-model" {
-            if let Some(value) = args.get(index + 1) {
-                config.model = value.to_string_lossy().to_string();
-                index += 1;
-            }
-        } else if arg == "--page-agent-url" {
-            if let Some(value) = args.get(index + 1) {
-                config.url = value.to_string_lossy().to_string();
-                index += 1;
-            }
-        } else if arg == "--page-agent-key" {
-            if let Some(value) = args.get(index + 1) {
-                config.key = value.to_string_lossy().to_string();
-                index += 1;
-            }
-        } else if let Some(value) = arg.strip_prefix("--page-agent-model=") {
-            config.model = value.to_string();
-        } else if let Some(value) = arg.strip_prefix("--page-agent-url=") {
-            config.url = value.to_string();
-        } else if let Some(value) = arg.strip_prefix("--page-agent-key=") {
-            config.key = value.to_string();
+    if let Ok(parsed) = parse_cli_args(parse_slice) {
+        if let Some(model) = parsed.page_agent_model {
+            config.model = model;
         }
-
-        index += 1;
+        if let Some(url) = parsed.page_agent_url {
+            config.url = url;
+        }
+        if let Some(key) = parsed.page_agent_key {
+            config.key = key;
+        }
     }
 
     config
 }
 
-fn is_page_agent_flag_with_value(arg: &str) -> bool {
-    matches!(
-        arg,
-        "--page-agent-model" | "--page-agent-url" | "--page-agent-key"
-    )
-}
-
-fn is_page_agent_inline_flag(arg: &str) -> bool {
-    arg.starts_with("--page-agent-model=")
-        || arg.starts_with("--page-agent-url=")
-        || arg.starts_with("--page-agent-key=")
-}
-
 pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
     let command_flag = OsString::from("--command");
     if let Some(index) = args.iter().position(|arg| arg == &command_flag) {
-        let forwarded = args.iter().skip(index + 1).cloned().collect();
+        let forwarded = args
+            .iter()
+            .skip(index + 1)
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
         return CliMode::Command(forwarded);
     }
 
-    let mcp_mode = args
-        .iter()
-        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--mcp"));
-    if mcp_mode {
+    let parsed = match parse_cli_args(args) {
+        Ok(parsed) => parsed,
+        Err(_) => return CliMode::Serve,
+    };
+
+    if parsed.mcp {
         return CliMode::Mcp;
     }
 
-    let register_uri = args
-        .iter()
-        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--register-uri"));
-    if register_uri {
+    if parsed.register_uri {
         return CliMode::RegisterUri;
     }
 
-    let unregister_uri = args
-        .iter()
-        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--unregister-uri"));
-    if unregister_uri {
+    if parsed.unregister_uri {
         return CliMode::UnregisterUri;
     }
 
-    let show_version = args.iter().any(|arg| {
-        matches!(
-            arg.to_string_lossy().as_ref(),
-            "version" | "--version" | "-V"
-        )
-    });
-
-    let take_screenshot = args
-        .iter()
-        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--screenshot"));
-    let clean_binary = args
-        .iter()
-        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--clean"));
-
-    if clean_binary {
+    if parsed.clean {
         return CliMode::Clean;
     }
 
-    if take_screenshot {
+    if parsed.screenshot {
         return CliMode::Screenshot;
     }
 
-    if show_version {
-        CliMode::Version
-    } else if let Some(uri) = {
-        let mut skip_next = false;
-        args.iter().find_map(|arg| {
-            let candidate = arg.to_string_lossy();
-
-            if skip_next {
-                skip_next = false;
-                return None;
-            }
-
-            if is_page_agent_flag_with_value(&candidate) {
-                skip_next = true;
-                return None;
-            }
-
-            if is_page_agent_inline_flag(&candidate) {
-                return None;
-            }
-
-            if candidate.contains("://") {
-                Some(candidate.to_string())
-            } else {
-                None
-            }
-        })
-    } {
-        CliMode::UriLaunch(uri)
-    } else {
-        CliMode::Serve
+    if parsed.version
+        || parsed
+            .input
+            .as_ref()
+            .map(|value| value.to_string_lossy() == "version")
+            .unwrap_or(false)
+    {
+        return CliMode::Version;
     }
+
+    if let Some(input) = parsed.input {
+        let candidate = input.to_string_lossy();
+        if candidate.contains("://") {
+            return CliMode::UriLaunch(candidate.to_string());
+        }
+    }
+
+    CliMode::Serve
+}
+
+fn parse_cli_verbose(args: &[OsString]) -> bool {
+    let command_flag = OsString::from("--command");
+    let parse_slice = if let Some(index) = args.iter().position(|arg| arg == &command_flag) {
+        &args[..index]
+    } else {
+        args
+    };
+
+    match parse_cli_args(parse_slice) {
+        Ok(parsed) => parsed.verbose,
+        Err(_) => false,
+    }
+}
+
+async fn run_page_agent_injection(
+    binary_path: &Path,
+    page_agent_config: &PageAgentRuntimeConfig,
+) -> Result<i32, Box<dyn Error>> {
+    use crate::server::render_page_agent_bundle;
+
+    let bundle = render_page_agent_bundle(page_agent_config);
+    let max_chunk_bytes = 20_000;
+
+    let run_eval = |script: String| async move {
+        let status = Command::new(binary_path)
+            .arg("eval")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await?;
+        Ok::<i32, Box<dyn Error>>(status.code().unwrap_or(1))
+    };
+
+    let init_exit = run_eval("window.__absPageAgentChunks = [];".to_string()).await?;
+    if init_exit != 0 {
+        return Ok(init_exit);
+    }
+
+    let mut chunk_start = 0;
+    while chunk_start < bundle.len() {
+        let mut chunk_end = (chunk_start + max_chunk_bytes).min(bundle.len());
+        while chunk_end > chunk_start && !bundle.is_char_boundary(chunk_end) {
+            chunk_end -= 1;
+        }
+
+        if chunk_end == chunk_start {
+            break;
+        }
+
+        let chunk = &bundle[chunk_start..chunk_end];
+        let serialized_chunk = serde_json::to_string(chunk).unwrap_or_else(|_| "\"\"".to_string());
+        let append_script = format!("window.__absPageAgentChunks.push({serialized_chunk});");
+
+        let append_exit = run_eval(append_script).await?;
+        if append_exit != 0 {
+            return Ok(append_exit);
+        }
+
+        chunk_start = chunk_end;
+    }
+
+    let finalize_script = r#"(() => {
+    if (window.PageAgent) return 'already_loaded';
+    const source = (window.__absPageAgentChunks || []).join('');
+    delete window.__absPageAgentChunks;
+    (0, eval)(source);
+    if (!window.PageAgent) throw new Error('PageAgent not found on window after eval');
+    return 'loaded';
+})()"#;
+
+    run_eval(finalize_script.to_string()).await
+}
+
+async fn run_page_agent_prompt(binary_path: &Path, prompt: &str) -> Result<i32, Box<dyn Error>> {
+    let script = crate::server::build_page_agent_prompt_script(prompt);
+    let status = Command::new(binary_path)
+        .arg("eval")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await?;
+
+    Ok(status.code().unwrap_or(1))
 }
 
 fn register_uri_scheme() -> Result<(), Box<dyn Error>> {
@@ -492,6 +572,7 @@ fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
 
 pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
     let page_agent_config = parse_page_agent_cli_config(&args);
+    let verbose = parse_cli_verbose(&args);
 
     match parse_cli_mode(&args) {
         CliMode::RegisterUri => {
@@ -509,15 +590,53 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             }
             Ok(0)
         }
-        CliMode::Command(forwarded_args) => {
+        CliMode::Command(mut forwarded_args) => {
             if forwarded_args.is_empty() {
                 eprintln!("missing forwarded arguments after --command");
                 return Ok(2);
             }
 
+            let prompt = match translate_agentic_prompt(&mut forwarded_args) {
+                Ok(prompt) => prompt,
+                Err(message) => {
+                    eprintln!("{message}");
+                    return Ok(2);
+                }
+            };
+            let should_inject_page_agent =
+                translate_agentic_open(&mut forwarded_args) || prompt.is_some();
+
             let config = load_config()?;
             let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
-            let exit_code = run_command_passthrough(binary_path, forwarded_args).await?;
+            let exit_code = if has_passthrough_command(&forwarded_args) {
+                run_command_passthrough(&binary_path, forwarded_args, verbose).await?
+            } else {
+                0
+            };
+
+            if should_inject_page_agent && exit_code == 0 {
+                let injection_exit_code =
+                    run_page_agent_injection(&binary_path, &page_agent_config).await?;
+                if injection_exit_code != 0 {
+                    eprintln!(
+                        "page-agent injection failed with exit code {}",
+                        injection_exit_code
+                    );
+                    return Ok(injection_exit_code);
+                }
+
+                if let Some(prompt) = prompt {
+                    let prompt_exit_code = run_page_agent_prompt(&binary_path, &prompt).await?;
+                    if prompt_exit_code != 0 {
+                        eprintln!(
+                            "page-agent prompt execution failed with exit code {}",
+                            prompt_exit_code
+                        );
+                        return Ok(prompt_exit_code);
+                    }
+                }
+            }
+
             Ok(exit_code)
         }
         CliMode::Version => {
@@ -591,17 +710,20 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
 }
 
 pub async fn run_command_passthrough(
-    binary_path: std::path::PathBuf,
-    forwarded_args: Vec<OsString>,
+    binary_path: &Path,
+    forwarded_args: Vec<String>,
+    verbose: bool,
 ) -> Result<i32, Box<dyn Error>> {
-    let status = Command::new(binary_path)
-        .arg("--native")
-        .args(forwarded_args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .await?;
+    let mut command = Command::new(binary_path);
+    command.args(forwarded_args).stdin(Stdio::inherit());
+
+    if verbose {
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+
+    let status = command.status().await?;
 
     Ok(status.code().unwrap_or(1))
 }
@@ -747,7 +869,7 @@ mod tests {
             let path = dir.join("mock-browser.cmd");
             std::fs::write(
                 &path,
-                "@echo off\r\nif \"%1\"==\"--native\" shift\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
+                "@echo off\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
             )
             .expect("write cmd");
             path
@@ -760,7 +882,43 @@ mod tests {
             let path = dir.join("mock-browser.sh");
             std::fs::write(
                 &path,
-                "#!/bin/sh\nif [ \"$1\" = \"--native\" ]; then shift; fi\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\n",
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\n",
+            )
+            .expect("write shell script");
+            let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("chmod");
+            path
+        }
+    }
+
+    fn create_mock_browser_binary_with_eval_failure() -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("abs-app-eval-fail-{unique}"));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        #[cfg(windows)]
+        {
+            let path = dir.join("mock-browser-eval-fail.cmd");
+            std::fs::write(
+                &path,
+                "@echo off\r\nif \"%1\"==\"eval\" exit /b 7\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
+            )
+            .expect("write cmd");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let path = dir.join("mock-browser-eval-fail.sh");
+            std::fs::write(
+                &path,
+                "#!/bin/sh\nif [ \"$1\" = \"eval\" ]; then\n  exit 7\nfi\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\n",
             )
             .expect("write shell script");
             let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
@@ -780,7 +938,7 @@ mod tests {
 
         assert_eq!(
             parse_cli_mode(&args),
-            CliMode::Command(vec![OsString::from("open")])
+            CliMode::Command(vec!["open".to_string()])
         );
     }
 
@@ -844,6 +1002,18 @@ mod tests {
         assert_eq!(parsed.model, "my-model");
         assert_eq!(parsed.url, "http://127.0.0.1:5000/v1");
         assert_eq!(parsed.key, "secret-key");
+    }
+
+    #[test]
+    fn parse_cli_verbose_defaults_off_and_enables_with_flag() {
+        assert!(!parse_cli_verbose(&[]));
+        assert!(parse_cli_verbose(&[OsString::from("--verbose")]));
+        assert!(parse_cli_verbose(&[
+            OsString::from("--verbose"),
+            OsString::from("--command"),
+            OsString::from("open"),
+            OsString::from("https://example.com")
+        ]));
     }
 
     #[test]
@@ -922,6 +1092,53 @@ mod tests {
         .expect("run passthrough");
 
         assert_eq!(result, 0);
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        clear_abs_env();
+    }
+
+    #[tokio::test]
+    async fn run_with_args_agentic_open_fails_when_injection_fails() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        clear_abs_env();
+        let mock_browser = create_mock_browser_binary_with_eval_failure();
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("abs-app-home-strict-{unique}"));
+        let cwd = std::env::temp_dir().join(format!("abs-app-cwd-strict-{unique}"));
+        std::fs::create_dir_all(&home).expect("create home");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+
+        let original_home: Option<OsString> = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let _cwd_guard = DirGuard::enter(&cwd);
+
+        std::fs::write(
+            cwd.join(".abs"),
+            format!("browser_path = \"{}\"\n", mock_browser.display()),
+        )
+        .expect("write .abs");
+
+        let result = run_with_args(vec![
+            OsString::from("--command"),
+            OsString::from("agentic-open"),
+            OsString::from("https://example.com"),
+        ])
+        .await
+        .expect("run passthrough");
+
+        assert_eq!(result, 7);
 
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);

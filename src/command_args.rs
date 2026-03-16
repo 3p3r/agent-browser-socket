@@ -1,5 +1,3 @@
-//! Shared command argument parsing utilities.
-
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,10 +7,6 @@ pub enum ExecutablePathPrefill {
     Unavailable,
 }
 
-/// Parse command arguments from either an args array or a shell-quoted command string.
-///
-/// Returns the parsed arguments on success, or an error message if neither args nor command
-/// contain valid non-empty arguments.
 pub fn build_args(
     command: &Option<String>,
     args: &Option<Vec<String>>,
@@ -53,14 +47,46 @@ pub fn ensure_executable_path_arg(
     ExecutablePathPrefill::Unavailable
 }
 
-pub fn strip_with_page_agent_flag(args: &mut Vec<String>) -> bool {
-    let initial_len = args.len();
-    args.retain(|arg| arg != "--with-page-agent");
-    args.len() != initial_len
+pub fn has_passthrough_command(args: &[String]) -> bool {
+    args.iter().any(|arg| !arg.starts_with('-'))
 }
 
-pub fn is_open_command(args: &[String]) -> bool {
-    args.first().map(|arg| arg == "open").unwrap_or(false) && args.get(1).is_some()
+pub fn translate_agentic_open(args: &mut [String]) -> bool {
+    if let Some(index) = args.iter().position(|arg| arg == "agentic-open") {
+        if args.get(index + 1).is_some() {
+            args[index] = "open".to_string();
+            return true;
+        }
+    }
+
+    false
+}
+
+pub fn translate_agentic_prompt(args: &mut Vec<String>) -> Result<Option<String>, String> {
+    if let Some(index) = args.iter().position(|arg| arg == "agentic-prompt") {
+        let Some(first_arg) = args.get(index + 1).cloned() else {
+            return Err("agentic-prompt requires a prompt".to_string());
+        };
+
+        let second_arg = args.get(index + 2).cloned();
+        let first_looks_like_url = first_arg.contains("://") || first_arg.starts_with("about:");
+
+        if first_looks_like_url {
+            let Some(prompt) = second_arg else {
+                return Err("agentic-prompt requires a prompt".to_string());
+            };
+            args[index] = "open".to_string();
+            args[index + 1] = first_arg;
+            args.remove(index + 2);
+            return Ok(Some(prompt));
+        }
+
+        args.remove(index + 1);
+        args.remove(index);
+        return Ok(Some(first_arg));
+    }
+
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -164,41 +190,84 @@ mod tests {
     }
 
     #[test]
-    fn strip_with_page_agent_flag_removes_all_occurrences() {
+    fn translate_agentic_open_rewrites_command_and_returns_true() {
         let mut args = vec![
-            "open".to_string(),
+            "agentic-open".to_string(),
             "https://example.com".to_string(),
-            "--with-page-agent".to_string(),
-            "--with-page-agent".to_string(),
         ];
 
-        let was_present = strip_with_page_agent_flag(&mut args);
+        let should_inject = translate_agentic_open(&mut args);
 
-        assert!(was_present);
+        assert!(should_inject);
         assert_eq!(args, vec!["open", "https://example.com"]);
     }
 
     #[test]
-    fn strip_with_page_agent_flag_noop_when_absent() {
+    fn translate_agentic_open_returns_false_for_plain_open() {
         let mut args = vec!["open".to_string(), "https://example.com".to_string()];
 
-        let was_present = strip_with_page_agent_flag(&mut args);
+        let should_inject = translate_agentic_open(&mut args);
 
-        assert!(!was_present);
+        assert!(!should_inject);
         assert_eq!(args, vec!["open", "https://example.com"]);
     }
 
     #[test]
-    fn is_open_command_requires_open_and_url() {
-        assert!(is_open_command(&[
-            "open".to_string(),
-            "https://example.com".to_string()
-        ]));
-        assert!(!is_open_command(&["open".to_string()]));
-        assert!(!is_open_command(&[
-            "goto".to_string(),
-            "https://example.com".to_string()
-        ]));
-        assert!(!is_open_command(&[]));
+    fn translate_agentic_open_requires_target_url() {
+        let mut missing_url = vec!["agentic-open".to_string()];
+        assert!(!translate_agentic_open(&mut missing_url));
+        assert_eq!(missing_url, vec!["agentic-open"]);
+
+        let mut unrelated = vec!["goto".to_string(), "https://example.com".to_string()];
+        assert!(!translate_agentic_open(&mut unrelated));
+        assert_eq!(unrelated, vec!["goto", "https://example.com"]);
+    }
+
+    #[test]
+    fn translate_agentic_open_handles_leading_flags() {
+        let mut args = vec![
+            "--headed".to_string(),
+            "agentic-open".to_string(),
+            "https://example.com".to_string(),
+        ];
+
+        let should_inject = translate_agentic_open(&mut args);
+
+        assert!(should_inject);
+        assert_eq!(args, vec!["--headed", "open", "https://example.com"]);
+    }
+
+    #[test]
+    fn translate_agentic_prompt_rewrites_command_and_extracts_prompt() {
+        let mut args = vec![
+            "agentic-prompt".to_string(),
+            "https://example.com".to_string(),
+            "write tests".to_string(),
+        ];
+
+        let prompt = translate_agentic_prompt(&mut args).expect("translate");
+
+        assert_eq!(prompt, Some("write tests".to_string()));
+        assert_eq!(args, vec!["open", "https://example.com"]);
+    }
+
+    #[test]
+    fn translate_agentic_prompt_supports_prompt_only_current_page() {
+        let mut args = vec!["agentic-prompt".to_string(), "write tests".to_string()];
+
+        let prompt = translate_agentic_prompt(&mut args).expect("translate");
+
+        assert_eq!(prompt, Some("write tests".to_string()));
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn translate_agentic_prompt_requires_url_and_prompt() {
+        let mut missing_prompt = vec!["agentic-prompt".to_string()];
+        assert!(translate_agentic_prompt(&mut missing_prompt).is_err());
+
+        let mut unrelated = vec!["open".to_string(), "https://example.com".to_string()];
+        assert_eq!(translate_agentic_prompt(&mut unrelated).unwrap(), None);
+        assert_eq!(unrelated, vec!["open", "https://example.com"]);
     }
 }

@@ -36,7 +36,7 @@ let failed = 0;
 function run(args) {
   return new Promise((resolve) => {
     execFile(binaryPath, args, { timeout: 30_000 }, (error, stdout, stderr) => {
-      resolve({ code: error ? error.code ?? 1 : 0, stdout, stderr });
+      resolve({ code: error ? (error.code ?? 1) : 0, stdout, stderr });
     });
   });
 }
@@ -65,7 +65,7 @@ await test("--version prints wrapper version", ["--version"], ({ code, stdout })
   assert(code === 0, `expected exit code 0, got ${code}`);
   assert(
     stdout.includes("agent-browser-socket"),
-    `stdout should contain "agent-browser-socket", got: ${stdout.trim()}`
+    `stdout should contain "agent-browser-socket", got: ${stdout.trim()}`,
   );
 });
 

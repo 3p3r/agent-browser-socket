@@ -140,7 +140,7 @@ fn create_mock_binary() -> PathBuf {
         let path = dir.join("mock-agent-browser.cmd");
         std::fs::write(
             &path,
-            "@echo off\r\nif \"%1\"==\"--native\" shift\r\nif \"%1\"==\"fail\" (echo boom 1>&2 & exit /b 5)\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
+            "@echo off\r\nif \"%1\"==\"fail\" (echo boom 1>&2 & exit /b 5)\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
         )
         .expect("write mock cmd");
         return path;
@@ -153,7 +153,7 @@ fn create_mock_binary() -> PathBuf {
         let path = dir.join("mock-agent-browser.sh");
         std::fs::write(
             &path,
-            "#!/bin/sh\nif [ \"$1\" = \"--native\" ]; then shift; fi\nif [ \"$1\" = \"fail\" ]; then echo boom 1>&2; exit 5; fi\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = \"fail\" ]; then echo boom 1>&2; exit 5; fi\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\nexit 0\n",
         )
         .expect("write mock shell");
         let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();

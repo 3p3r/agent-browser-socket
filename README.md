@@ -145,13 +145,13 @@ For Socket.IO `command` and MCP `command` calls:
 - If the caller already passes `--executable-path` (either `--executable-path=/x` or `--executable-path /x`), the server does not override it.
 - If detection fails and no automatic `--executable-path` can be injected, run `agent-browser-socket --command install` to install a browser through this binary.
 
-### Synthetic `--with-page-agent` Flag
+### Synthetic `agentic-open` Command
 
 For Socket.IO `command` and MCP `command` calls:
 
-- `--with-page-agent` is treated as a synthetic control flag and removed before forwarding args to `agent-browser`.
-- Page Agent injection runs via a follow-up `agent-browser eval` only after a successful `open <url>` command.
-- Injection is skipped for non-`open` commands even when `--with-page-agent` is present.
+- `agentic-open <url>` is treated as a synthetic command and translated to `open <url>` before forwarding to `agent-browser`.
+- Page Agent injection runs via a follow-up `agent-browser eval` only after a successful translated `open <url>` command.
+- Injection is skipped for all commands other than `agentic-open`.
 - The injected script tag targets the embedded Page Agent asset route.
 
 **Client config:**

@@ -115,7 +115,7 @@ fn create_mock_browser_binary() -> PathBuf {
         let path = dir.join("mock-browser.cmd");
         std::fs::write(
             &path,
-            "@echo off\r\nif \"%1\"==\"--native\" shift\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
+            "@echo off\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
         )
         .expect("write cmd");
         path
@@ -128,7 +128,7 @@ fn create_mock_browser_binary() -> PathBuf {
         let path = dir.join("mock-browser.sh");
         std::fs::write(
             &path,
-            "#!/bin/sh\nif [ \"$1\" = \"--native\" ]; then shift; fi\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\n",
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\n",
         )
         .expect("write shell script");
         let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
@@ -363,7 +363,7 @@ fn cli_version_and_command_paths_work() {
     .expect("write local .abs for cli test");
 
     let passthrough_output = Command::new(&exe)
-        .args(["--command", "one", "two"])
+        .args(["--verbose", "--command", "one", "two"])
         .output()
         .expect("run passthrough command");
     assert!(
