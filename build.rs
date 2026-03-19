@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-const VERSION: &str = "v0.21.0";
+const VERSION: &str = "v0.21.2";
 
 fn main() {
     if let Err(error) = run() {
