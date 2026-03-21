@@ -1,5 +1,4 @@
 mod app;
-mod auth;
 mod browser_detection;
 mod command_args;
 mod configuration;

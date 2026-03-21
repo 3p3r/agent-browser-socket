@@ -4,7 +4,7 @@ use crate::command_args::{
 use crate::configuration::{load_config, AppConfig, PageAgentConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
 use crate::screenshot::capture_all_screenshots;
-use crate::server::{build_router, unregister_uri_scheme, AppState, URI_SCHEME};
+use crate::server::{unregister_uri_scheme, URI_SCHEME};
 use clap::{ArgAction, CommandFactory, Parser};
 use coolor::Hsl;
 use crossterm::cursor;
@@ -24,19 +24,17 @@ use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use sysuri::UriScheme;
 use tachyonfx::{fx, Duration as FxDuration, Effect, Shader};
-use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::mpsc as tokio_mpsc;
 use url::Url;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "agent-browser-socket",
+    name = "agent-browser-server",
     disable_help_subcommand = true,
     disable_version_flag = true
 )]
@@ -79,7 +77,7 @@ pub enum CliMode {
 }
 
 fn parse_cli_args(args: &[OsString]) -> Result<CliArgs, String> {
-    let argv = std::iter::once(OsString::from("agent-browser-socket")).chain(args.iter().cloned());
+    let argv = std::iter::once(OsString::from("agent-browser-server")).chain(args.iter().cloned());
     CliArgs::try_parse_from(argv).map_err(|error| {
         let mut command = CliArgs::command();
         error.format(&mut command).to_string()
@@ -257,7 +255,7 @@ async fn run_page_agent_prompt(binary_path: &Path, prompt: &str) -> Result<i32, 
 
 fn register_uri_scheme() -> Result<(), Box<dyn Error>> {
     let executable = std::env::current_exe()?;
-    let uri_scheme = UriScheme::new(URI_SCHEME.unsecure(), "Agent Browser Socket", executable);
+    let uri_scheme = UriScheme::new(URI_SCHEME.unsecure(), "Agent Browser Server", executable);
     sysuri::register(&uri_scheme)?;
     Ok(())
 }
@@ -432,7 +430,7 @@ fn run_idle_animation_loop(
         let elapsed = start.elapsed();
         let spinner_index = ((elapsed.as_millis() / 140) as usize) % spinner.len();
 
-        let title = format!(" agent-browser-socket {} ", spinner[spinner_index]);
+        let title = format!(" agent-browser-server {} ", spinner[spinner_index]);
         let subtitle = format!("Listening on {host}:{port}");
         let uptime = format!("uptime {}s", elapsed.as_secs());
 
@@ -475,7 +473,7 @@ fn run_idle_animation_loop(
                 status_lines.push(Line::from(""));
                 let detected_line = match &detected_browser_path {
                     Some(path) => format!("browser: {path}"),
-                    None => "browser: not found (run `agent-browser-socket --command install`)"
+                    None => "browser: not found (run `agent-browser-server --command install`)"
                         .to_string(),
                 };
                 status_lines.push(Line::from(Span::styled(
@@ -484,7 +482,7 @@ fn run_idle_animation_loop(
                 )));
 
                 let dashboard_host = if host == "0.0.0.0" { "localhost" } else { host };
-                let dashboard_line = format!("dashboard: http://{dashboard_host}:{port}/");
+                let dashboard_line = format!("mcp sse: http://{dashboard_host}:{port}/mcp");
                 status_lines.push(Line::from(Span::styled(
                     dashboard_line,
                     Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
@@ -643,7 +641,7 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             Ok(exit_code)
         }
         CliMode::Version => {
-            println!("agent-browser-socket {}", env!("CARGO_PKG_VERSION"));
+            println!("agent-browser-server {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
         CliMode::Clean => {
@@ -672,24 +670,16 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             let page_agent_config = build_page_agent_config(&config, &args);
             apply_uri_overrides(&mut config, &uri)?;
 
-            let (disconnect_tx, mut disconnect_rx) = tokio_mpsc::channel::<()>(1);
             let (quit_tx, mut quit_rx) = tokio_mpsc::channel::<()>(1);
             let shutdown = async move {
                 tokio::select! {
                     _ = shutdown_signal() => {}
-                    _ = disconnect_rx.recv() => {}
                     _ = quit_rx.recv() => {}
                 }
             };
 
-            run_server_with_shutdown_internal(
-                config,
-                page_agent_config,
-                shutdown,
-                Some(disconnect_tx),
-                Some(quit_tx),
-            )
-            .await?;
+            run_mcp_sse_with_shutdown_internal(config, page_agent_config, shutdown, Some(quit_tx))
+                .await?;
             Ok(0)
         }
         CliMode::Serve => {
@@ -705,14 +695,8 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
                 }
             };
 
-            run_server_with_shutdown_internal(
-                config,
-                page_agent_config,
-                shutdown,
-                None,
-                Some(quit_tx),
-            )
-            .await?;
+            run_mcp_sse_with_shutdown_internal(config, page_agent_config, shutdown, Some(quit_tx))
+                .await?;
             Ok(0)
         }
     }
@@ -737,37 +721,16 @@ pub async fn run_command_passthrough(
     Ok(status.code().unwrap_or(1))
 }
 
-async fn run_server_with_shutdown_internal<F>(
+async fn run_mcp_sse_with_shutdown_internal<F>(
     config: AppConfig,
     page_agent_config: PageAgentConfig,
     shutdown: F,
-    disconnect_tx: Option<tokio_mpsc::Sender<()>>,
     quit_tx: Option<tokio_mpsc::Sender<()>>,
 ) -> Result<(), Box<dyn Error>>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
     let detected_browser_path = crate::browser_detection::find_chrome_browser();
-    let public_host = if config.host == "0.0.0.0" {
-        "localhost".to_string()
-    } else {
-        config.host.clone()
-    };
-    let public_origin = format!("http://{public_host}:{}", config.port);
-
-    let state = Arc::new(AppState {
-        binary_path,
-        detected_browser_path: detected_browser_path.clone(),
-        public_origin,
-        page_agent_config,
-        auth_url: config.auth_url.clone(),
-        http_client: reqwest::Client::new(),
-        disconnect_tx,
-    });
-
-    let (app, io) = build_router(state);
-    let listener = TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
 
     let animation = IdleAnimationGuard::start(
         &config.host,
@@ -779,17 +742,12 @@ where
     );
     if animation.is_none() {
         println!(
-            "agent-browser-socket listening on {}:{}",
+            "agent-browser-server listening on {}:{}",
             config.host, config.port
         );
     }
 
-    let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown.await;
-            let _ = io.disconnect().await;
-        })
-        .await;
+    let serve_result = crate::mcp::run_mcp_sse(config, page_agent_config, shutdown).await;
 
     if let Some(animation) = animation {
         animation.stop();
@@ -807,8 +765,7 @@ pub async fn run_server_with_shutdown<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    run_server_with_shutdown_internal(config, PageAgentConfig::default(), shutdown, None, None)
-        .await
+    run_mcp_sse_with_shutdown_internal(config, PageAgentConfig::default(), shutdown, None).await
 }
 
 pub async fn shutdown_signal() {

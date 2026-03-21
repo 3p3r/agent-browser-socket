@@ -28,7 +28,7 @@ pub async fn check_auth(
         request = request.header(HEADER_COOKIE.unsecure(), value);
     }
 
-    request = request.header(HEADER_X_ORIGINAL_URI.unsecure(), "/socket.io");
+    request = request.header(HEADER_X_ORIGINAL_URI.unsecure(), "/mcp");
 
     let response = request
         .send()

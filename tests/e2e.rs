@@ -1,133 +1,32 @@
-#[path = "../src/auth.rs"]
-mod auth;
+#[path = "../src/browser_detection.rs"]
+mod browser_detection;
 #[path = "../src/command_args.rs"]
 mod command_args;
 #[path = "../src/configuration.rs"]
 mod configuration;
+#[path = "../src/embedded_binary.rs"]
+mod embedded_binary;
+#[path = "../src/mcp.rs"]
+mod mcp;
 #[path = "../src/screenshot.rs"]
 mod screenshot;
 #[path = "../src/server.rs"]
 mod server;
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::routing::any;
-use axum::{Json, Router};
-use configuration::PageAgentConfig;
-use serde_json::json;
-use serde_json::Value;
-use server::{build_router, AppState};
+use configuration::AppConfig;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
-use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
-fn detected_browser_for_tests() -> PathBuf {
-    PathBuf::from("/detected/browser")
-}
-
-#[derive(Clone)]
-struct AuthState {
-    status: StatusCode,
-    seen: Arc<Mutex<Vec<HeaderMap>>>,
-}
-
-struct RunningServer {
-    base_url: String,
-    shutdown: Option<oneshot::Sender<()>>,
-    handle: tokio::task::JoinHandle<()>,
-}
-
-impl RunningServer {
-    async fn stop(mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        let _ = self.handle.await;
-    }
-}
-
-async fn ensure_node_client_installed() {
-    if std::path::Path::new("node_modules/socket.io-client").exists() {
-        return;
-    }
-
-    let status = Command::new("npm")
-        .args(["install", "--silent"])
-        .status()
-        .await
-        .expect("failed to run npm install for test client");
-
-    assert!(status.success(), "npm install failed with status {status}");
-}
-
-async fn run_socket_client(base_url: &str, event_name: &str, payload: Value) -> Vec<Value> {
-    ensure_node_client_installed().await;
-
-    let output = Command::new("node")
-        .args([
-            "tests/socket_client.mjs",
-            base_url,
-            event_name,
-            &payload.to_string(),
-            "2200",
-        ])
-        .output()
-        .await
-        .expect("failed to run node socket client");
-
-    assert!(
-        output.status.success(),
-        "socket client failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    serde_json::from_slice(&output.stdout).expect("invalid socket client output json")
-}
-
-async fn start_auth_server(status: StatusCode) -> (RunningServer, Arc<Mutex<Vec<HeaderMap>>>) {
-    let seen_headers = Arc::new(Mutex::new(Vec::new()));
-    let auth_state = AuthState {
-        status,
-        seen: seen_headers.clone(),
-    };
-
-    async fn auth_handler(
-        State(state): State<AuthState>,
-        headers: HeaderMap,
-    ) -> (StatusCode, Json<serde_json::Value>) {
-        state.seen.lock().expect("lock poisoned").push(headers);
-        (state.status, Json(json!({ "ok": true })))
-    }
-
-    let app = Router::new()
-        .route("/auth", any(auth_handler))
-        .with_state(auth_state);
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind auth server");
-    let port = listener.local_addr().expect("auth local addr").port();
-    let base_url = format!("http://127.0.0.1:{port}");
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-            })
-            .await;
-    });
-
-    (
-        RunningServer {
-            base_url,
-            shutdown: Some(shutdown_tx),
-            handle,
-        },
-        seen_headers,
-    )
+fn touch_imported_symbols() {
+    let config = configuration::AppConfig::default();
+    let _ = (&config.auth_url, &config.page_agent);
+    let _ = configuration::load_config;
+    let _ = embedded_binary::clean_cached_binary;
+    let _ = mcp::run_mcp_stdio;
+    let _ = &server::URI_SCHEME;
+    let _ = server::unregister_uri_scheme;
 }
 
 fn create_mock_binary() -> PathBuf {
@@ -143,10 +42,10 @@ fn create_mock_binary() -> PathBuf {
         let path = dir.join("mock-agent-browser.cmd");
         std::fs::write(
             &path,
-            "@echo off\r\nif \"%1\"==\"fail\" (echo boom 1>&2 & exit /b 5)\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
+            "@echo off\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
         )
         .expect("write mock cmd");
-        return path;
+        path
     }
 
     #[cfg(not(windows))]
@@ -156,7 +55,7 @@ fn create_mock_binary() -> PathBuf {
         let path = dir.join("mock-agent-browser.sh");
         std::fs::write(
             &path,
-            "#!/bin/sh\nif [ \"$1\" = \"fail\" ]; then echo boom 1>&2; exit 5; fi\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\nexit 0\n",
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\nexit 0\n",
         )
         .expect("write mock shell");
         let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
@@ -166,415 +65,88 @@ fn create_mock_binary() -> PathBuf {
     }
 }
 
-async fn start_main_server(auth_url: Option<String>) -> RunningServer {
-    let state = Arc::new(AppState {
-        binary_path: create_mock_binary(),
-        detected_browser_path: Some(detected_browser_for_tests()),
-        public_origin: "http://127.0.0.1".to_string(),
-        page_agent_config: PageAgentConfig::default(),
-        auth_url,
-        http_client: reqwest::Client::new(),
-        disconnect_tx: None,
-    });
-
-    let (app, _) = build_router(state);
-    let listener = TcpListener::bind("127.0.0.1:0")
+async fn reserve_local_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind main server");
-    let port = listener.local_addr().expect("main local addr").port();
-    let base_url = format!("http://127.0.0.1:{port}");
+        .expect("bind temp listener")
+        .local_addr()
+        .expect("local addr")
+        .port()
+}
+
+async fn start_mcp_sse_server() -> (String, oneshot::Sender<()>) {
+    touch_imported_symbols();
+
+    let mut config = AppConfig::default();
+    config.host = "127.0.0.1".to_string();
+    config.port = reserve_local_port().await;
+    config.browser_path = Some(create_mock_binary().to_string_lossy().to_string());
+
+    let page_agent_config = configuration::PageAgentConfig::default();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let base_url = format!("http://{}:{}", config.host, config.port);
 
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-            })
+    tokio::spawn(async move {
+        let _ = mcp::run_mcp_sse(config, page_agent_config, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await;
+    });
+
+    let client = reqwest::Client::new();
+    for _ in 0..40 {
+        let response = client
+            .post(format!("{base_url}/mcp"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#)
+            .send()
             .await;
-    });
 
-    RunningServer {
-        base_url,
-        shutdown: Some(shutdown_tx),
-        handle,
+        if response.is_ok() {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
+    (base_url, shutdown_tx)
 }
 
-async fn start_uri_mode_server() -> (String, tokio::task::JoinHandle<()>) {
-    let (disconnect_tx, mut disconnect_rx) = mpsc::channel::<()>(1);
-    let state = Arc::new(AppState {
-        binary_path: create_mock_binary(),
-        detected_browser_path: Some(detected_browser_for_tests()),
-        public_origin: "http://127.0.0.1".to_string(),
-        page_agent_config: PageAgentConfig::default(),
-        auth_url: None,
-        http_client: reqwest::Client::new(),
-        disconnect_tx: Some(disconnect_tx),
-    });
+#[tokio::test]
+async fn mcp_sse_initialize_returns_session_header() {
+    let (base_url, shutdown) = start_mcp_sse_server().await;
 
-    let (app, _) = build_router(state);
-    let listener = TcpListener::bind("127.0.0.1:0")
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/mcp"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .body(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#)
+        .send()
         .await
-        .expect("bind uri mode server");
-    let port = listener.local_addr().expect("uri mode local addr").port();
-    let base_url = format!("http://127.0.0.1:{port}");
+        .expect("initialize request should succeed");
 
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = disconnect_rx.recv().await;
-            })
-            .await;
-    });
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(response.headers().get("mcp-session-id").is_some());
 
-    (base_url, handle)
+    let body = response.text().await.expect("initialize response body");
+    assert!(body.contains("\"result\""));
+
+    let _ = shutdown.send(());
 }
 
 #[tokio::test]
-async fn socket_health_event_returns_ok() {
-    let server = start_main_server(None).await;
-    let events = run_socket_client(&server.base_url, "health", json!({})).await;
-    server.stop().await;
+async fn mcp_sse_rejects_get_without_session_id() {
+    let (base_url, shutdown) = start_mcp_sse_server().await;
 
-    let health = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("health")))
-        .expect("health event missing");
-    assert_eq!(health["data"]["status"], "ok");
-}
-
-#[tokio::test]
-async fn socket_version_event_returns_version() {
-    let server = start_main_server(None).await;
-    let events = run_socket_client(&server.base_url, "version", json!({})).await;
-    server.stop().await;
-
-    let version = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("version")))
-        .expect("version event missing");
-    assert!(version["data"]["version"].as_str().is_some());
-}
-
-#[tokio::test]
-async fn dashboard_uses_embedded_clients_and_asset_routes_are_served() {
-    let server = start_main_server(None).await;
-    let dashboard_response = reqwest::get(format!("{}/", server.base_url))
+    let response = reqwest::Client::new()
+        .get(format!("{base_url}/mcp"))
+        .header("Accept", "text/event-stream")
+        .send()
         .await
-        .expect("dashboard request");
-    assert_eq!(dashboard_response.status(), StatusCode::OK);
-    let dashboard_html = dashboard_response.text().await.expect("dashboard text");
-    assert!(dashboard_html.contains("/assets/socket.io.min.js"));
-    assert!(dashboard_html.contains("/assets/page-agent.demo.js"));
+        .expect("get request should return response");
 
-    let socket_client_response =
-        reqwest::get(format!("{}/assets/socket.io.min.js", server.base_url))
-            .await
-            .expect("socket.io asset request");
-    assert_eq!(socket_client_response.status(), StatusCode::OK);
-    assert!(socket_client_response
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .contains("application/javascript"));
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
 
-    let page_agent_response =
-        reqwest::get(format!("{}/assets/page-agent.demo.js", server.base_url))
-            .await
-            .expect("page-agent asset request");
-    assert_eq!(page_agent_response.status(), StatusCode::OK);
-    assert!(page_agent_response
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .contains("application/javascript"));
-
-    let page_agent_body = page_agent_response
-        .text()
-        .await
-        .expect("page-agent asset body");
-    assert!(page_agent_body.contains("DEMO_BASE_URL=\"http://localhost:11434/v1\""));
-    assert!(!page_agent_body.contains("DEMO_BASE_URL=\"https://"));
-
-    server.stop().await;
-}
-
-#[tokio::test]
-async fn socket_command_emits_stdout_and_exit() {
-    let server = start_main_server(None).await;
-    let events = run_socket_client(
-        &server.base_url,
-        "command",
-        json!({ "args": ["hello", "world"] }),
-    )
-    .await;
-    server.stop().await;
-
-    let stdout_lines: Vec<_> = events
-        .iter()
-        .filter(|entry| entry.get("event") == Some(&json!("stdout")))
-        .filter_map(|entry| entry["data"]["line"].as_str())
-        .collect();
-    assert!(stdout_lines.iter().any(|line| line.contains("hello")));
-    assert!(stdout_lines.iter().any(|line| line.contains("world")));
-    assert!(stdout_lines
-        .iter()
-        .any(|line| line.starts_with("--executable-path=/detected/browser")));
-
-    let exit = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("exit")))
-        .expect("exit event missing");
-    assert_eq!(exit["data"]["code"], 0);
-}
-
-#[tokio::test]
-async fn socket_command_does_not_override_user_executable_path() {
-    let server = start_main_server(None).await;
-    let events = run_socket_client(
-        &server.base_url,
-        "command",
-        json!({ "args": ["open", "--executable-path=/custom/browser"] }),
-    )
-    .await;
-    server.stop().await;
-
-    let stdout_lines: Vec<_> = events
-        .iter()
-        .filter(|entry| entry.get("event") == Some(&json!("stdout")))
-        .filter_map(|entry| entry["data"]["line"].as_str())
-        .collect();
-
-    assert!(stdout_lines
-        .iter()
-        .any(|line| line == &"--executable-path=/custom/browser"));
-    assert!(!stdout_lines
-        .iter()
-        .any(|line| line.starts_with("--executable-path=/detected/browser")));
-}
-
-#[tokio::test]
-async fn socket_command_empty_input_emits_error() {
-    let server = start_main_server(None).await;
-    let events = run_socket_client(&server.base_url, "command", json!({ "args": [] })).await;
-    server.stop().await;
-
-    let error = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("error")))
-        .expect("error event missing");
-    assert_eq!(error["data"]["status"], 400);
-}
-
-#[tokio::test]
-async fn socket_command_auth_skipped_without_auth_url() {
-    let server = start_main_server(None).await;
-    let events = run_socket_client(
-        &server.base_url,
-        "command",
-        json!({ "args": ["no-auth-needed"] }),
-    )
-    .await;
-    server.stop().await;
-
-    assert!(events
-        .iter()
-        .any(|entry| entry.get("event") == Some(&json!("exit"))));
-    assert!(!events.iter().any(|entry| {
-        entry.get("event") == Some(&json!("error"))
-            && entry["data"]["message"] == "authorization denied"
-    }));
-}
-
-#[tokio::test]
-async fn socket_command_auth_401_emits_error() {
-    let (auth_server, _) = start_auth_server(StatusCode::UNAUTHORIZED).await;
-    let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
-    let events =
-        run_socket_client(&server.base_url, "command", json!({ "args": ["blocked"] })).await;
-    server.stop().await;
-    auth_server.stop().await;
-
-    let error = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("error")))
-        .expect("error event missing");
-    assert_eq!(error["data"]["status"], 401);
-}
-
-#[tokio::test]
-async fn socket_command_auth_403_emits_error() {
-    let (auth_server, _) = start_auth_server(StatusCode::FORBIDDEN).await;
-    let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
-    let events =
-        run_socket_client(&server.base_url, "command", json!({ "args": ["blocked"] })).await;
-    server.stop().await;
-    auth_server.stop().await;
-
-    let error = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("error")))
-        .expect("error event missing");
-    assert_eq!(error["data"]["status"], 403);
-}
-
-#[tokio::test]
-async fn socket_command_auth_200_allows_and_forwards_headers() {
-    let (auth_server, seen_headers) = start_auth_server(StatusCode::OK).await;
-    let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
-    let events = run_socket_client(
-        &server.base_url,
-        "command",
-        json!({
-            "args": ["allowed"],
-            "authorization": "Bearer token-123",
-            "cookie": "sid=abc"
-        }),
-    )
-    .await;
-    server.stop().await;
-    auth_server.stop().await;
-
-    assert!(events
-        .iter()
-        .any(|entry| entry.get("event") == Some(&json!("exit"))));
-    assert!(!events
-        .iter()
-        .any(|entry| entry.get("event") == Some(&json!("error"))));
-
-    let captured = seen_headers.lock().expect("lock headers");
-    assert!(!captured.is_empty(), "auth endpoint should be called");
-
-    let headers = &captured[0];
-    assert_eq!(
-        headers.get("authorization").and_then(|v| v.to_str().ok()),
-        Some("Bearer token-123")
-    );
-    assert_eq!(
-        headers.get("cookie").and_then(|v| v.to_str().ok()),
-        Some("sid=abc")
-    );
-    assert_eq!(
-        headers.get("x-original-uri").and_then(|v| v.to_str().ok()),
-        Some("/socket.io")
-    );
-}
-
-#[tokio::test]
-async fn socket_command_fail_emits_stderr_and_nonzero_exit() {
-    let server = start_main_server(None).await;
-    let events = run_socket_client(&server.base_url, "command", json!({ "args": ["fail"] })).await;
-    server.stop().await;
-
-    let stderr = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("stderr")))
-        .expect("stderr event missing");
-    assert_eq!(stderr["data"]["line"], "boom");
-
-    let exit = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("exit")))
-        .expect("exit event missing");
-    assert_eq!(exit["data"]["code"], 5);
-}
-
-#[tokio::test]
-async fn socket_command_auth_500_maps_to_error_500() {
-    let (auth_server, _) = start_auth_server(StatusCode::INTERNAL_SERVER_ERROR).await;
-    let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
-    let events =
-        run_socket_client(&server.base_url, "command", json!({ "args": ["blocked"] })).await;
-    server.stop().await;
-    auth_server.stop().await;
-
-    let error = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("error")))
-        .expect("error event missing");
-    assert_eq!(error["data"]["status"], 500);
-}
-
-#[tokio::test]
-async fn socket_screenshot_auth_401_emits_error() {
-    let (auth_server, _) = start_auth_server(StatusCode::UNAUTHORIZED).await;
-    let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
-    let events = run_socket_client(&server.base_url, "screenshot", json!({})).await;
-    server.stop().await;
-    auth_server.stop().await;
-
-    let error = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("error")))
-        .expect("error event missing");
-    assert_eq!(error["data"]["status"], 401);
-}
-
-#[tokio::test]
-async fn socket_screenshot_auth_200_forwards_headers_and_responds() {
-    let (auth_server, seen_headers) = start_auth_server(StatusCode::OK).await;
-    let server = start_main_server(Some(format!("{}/auth", auth_server.base_url))).await;
-    let events = run_socket_client(
-        &server.base_url,
-        "screenshot",
-        json!({
-            "authorization": "Bearer screenshot-token",
-            "cookie": "sid=screenshot"
-        }),
-    )
-    .await;
-    server.stop().await;
-    auth_server.stop().await;
-
-    let captured = seen_headers.lock().expect("lock headers");
-    assert!(!captured.is_empty(), "auth endpoint should be called");
-
-    let headers = &captured[0];
-    assert_eq!(
-        headers.get("authorization").and_then(|v| v.to_str().ok()),
-        Some("Bearer screenshot-token")
-    );
-    assert_eq!(
-        headers.get("cookie").and_then(|v| v.to_str().ok()),
-        Some("sid=screenshot")
-    );
-
-    let screenshot_event = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("screenshot")));
-    let error_event = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("error")));
-
-    assert!(
-        screenshot_event.is_some() || error_event.is_some(),
-        "expected screenshot or error event"
-    );
-
-    if let Some(error) = error_event {
-        assert_eq!(error["data"]["status"], 500);
-    } else if let Some(screenshot) = screenshot_event {
-        assert!(
-            screenshot["data"].is_array(),
-            "screenshot event should return an array of monitor screenshots"
-        );
-    }
-}
-
-#[tokio::test]
-async fn socket_shutdown_event_closes_uri_mode_server() {
-    let (base_url, handle) = start_uri_mode_server().await;
-
-    let events = run_socket_client(&base_url, "shutdown", json!({})).await;
-
-    let shutdown_event = events
-        .iter()
-        .find(|entry| entry.get("event") == Some(&json!("shutdown")))
-        .expect("shutdown event missing");
-    assert_eq!(shutdown_event["data"]["status"], "closing");
-
-    let joined = tokio::time::timeout(std::time::Duration::from_secs(3), handle).await;
-    assert!(joined.is_ok(), "server should exit after shutdown event");
+    let _ = shutdown.send(());
 }

@@ -40,7 +40,13 @@ pub fn ensure_executable_path_arg(
     }
 
     if let Some(path) = detected_browser_path {
-        args.push(format!("--executable-path={}", path.to_string_lossy()));
+        let executable_path_arg = format!("--executable-path={}", path.to_string_lossy());
+        let insert_index = args
+            .iter()
+            .position(|arg| !arg.starts_with('-'))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        args.insert(insert_index, executable_path_arg);
         return ExecutablePathPrefill::Injected;
     }
 
@@ -140,6 +146,19 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "--executable-path=/detected/chrome"));
+    }
+
+    #[test]
+    fn ensure_executable_path_arg_inserts_after_subcommand() {
+        let mut args = vec!["screenshot".to_string(), "--full".to_string()];
+        let detected = PathBuf::from("/detected/chrome");
+
+        let result = ensure_executable_path_arg(&mut args, Some(detected.as_path()));
+
+        assert_eq!(result, ExecutablePathPrefill::Injected);
+        assert_eq!(args[0], "screenshot");
+        assert_eq!(args[1], "--executable-path=/detected/chrome");
+        assert_eq!(args[2], "--full");
     }
 
     #[test]

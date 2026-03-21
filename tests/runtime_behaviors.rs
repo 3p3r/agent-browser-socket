@@ -146,9 +146,9 @@ fn resolve_wrapper_executable() -> PathBuf {
     }
 
     let exe_name = if cfg!(windows) {
-        "agent-browser-socket.exe"
+        "agent-browser-server.exe"
     } else {
-        "agent-browser-socket"
+        "agent-browser-server"
     };
     let candidate = path.join(exe_name);
 
@@ -392,7 +392,7 @@ fn cli_version_and_command_paths_work() {
         .expect("run --version");
     assert!(version_output.status.success());
     let version_stdout = String::from_utf8_lossy(&version_output.stdout);
-    assert!(version_stdout.contains("agent-browser-socket"));
+    assert!(version_stdout.contains("agent-browser-server"));
 
     let missing_command_output = Command::new(&exe)
         .arg("--command")
