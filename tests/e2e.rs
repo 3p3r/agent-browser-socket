@@ -1,3 +1,5 @@
+#[path = "../src/bashkit_executor.rs"]
+mod bashkit_executor;
 #[path = "../src/browser_detection.rs"]
 mod browser_detection;
 #[path = "../src/command_args.rs"]
@@ -8,14 +10,17 @@ mod configuration;
 mod embedded_binary;
 #[path = "../src/mcp.rs"]
 mod mcp;
+#[path = "../src/page_agent_runtime.rs"]
+mod page_agent_runtime;
+#[path = "../src/sandbox_files.rs"]
+mod sandbox_files;
 #[path = "../src/screenshot.rs"]
 mod screenshot;
 #[path = "../src/server.rs"]
 mod server;
 
 use configuration::AppConfig;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
@@ -29,42 +34,6 @@ fn touch_imported_symbols() {
     let _ = server::unregister_uri_scheme;
 }
 
-fn create_mock_binary() -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("abs-e2e-{unique}"));
-    std::fs::create_dir_all(&dir).expect("create test dir");
-
-    #[cfg(windows)]
-    {
-        let path = dir.join("mock-agent-browser.cmd");
-        std::fs::write(
-            &path,
-            "@echo off\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
-        )
-        .expect("write mock cmd");
-        path
-    }
-
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = dir.join("mock-agent-browser.sh");
-        std::fs::write(
-            &path,
-            "#!/bin/sh\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\nexit 0\n",
-        )
-        .expect("write mock shell");
-        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).expect("chmod");
-        path
-    }
-}
-
 async fn reserve_local_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .await
@@ -74,20 +43,19 @@ async fn reserve_local_port() -> u16 {
         .port()
 }
 
-async fn start_mcp_sse_server() -> (String, oneshot::Sender<()>) {
+async fn start_mcp_streamable_http_server() -> (String, oneshot::Sender<()>) {
     touch_imported_symbols();
 
     let mut config = AppConfig::default();
     config.host = "127.0.0.1".to_string();
     config.port = reserve_local_port().await;
-    config.browser_path = Some(create_mock_binary().to_string_lossy().to_string());
 
     let page_agent_config = configuration::PageAgentConfig::default();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let base_url = format!("http://{}:{}", config.host, config.port);
 
     tokio::spawn(async move {
-        let _ = mcp::run_mcp_sse(config, page_agent_config, async move {
+        let _ = mcp::run_mcp_streamable_http(config, page_agent_config, async move {
             let _ = shutdown_rx.await;
         })
         .await;
@@ -114,8 +82,8 @@ async fn start_mcp_sse_server() -> (String, oneshot::Sender<()>) {
 }
 
 #[tokio::test]
-async fn mcp_sse_initialize_returns_session_header() {
-    let (base_url, shutdown) = start_mcp_sse_server().await;
+async fn mcp_streamable_http_initialize_returns_session_header() {
+    let (base_url, shutdown) = start_mcp_streamable_http_server().await;
 
     let response = reqwest::Client::new()
         .post(format!("{base_url}/mcp"))
@@ -136,8 +104,8 @@ async fn mcp_sse_initialize_returns_session_header() {
 }
 
 #[tokio::test]
-async fn mcp_sse_rejects_get_without_session_id() {
-    let (base_url, shutdown) = start_mcp_sse_server().await;
+async fn mcp_streamable_http_rejects_get_without_session_id() {
+    let (base_url, shutdown) = start_mcp_streamable_http_server().await;
 
     let response = reqwest::Client::new()
         .get(format!("{base_url}/mcp"))

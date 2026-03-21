@@ -142,3 +142,4 @@ vite.config.ts.timestamp-*
 # Added by cargo
 
 /target
+/artifacts

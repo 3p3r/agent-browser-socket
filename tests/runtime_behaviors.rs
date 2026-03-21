@@ -1,5 +1,7 @@
 #[path = "../src/auth.rs"]
 mod auth;
+#[path = "../src/browser_detection.rs"]
+mod browser_detection;
 #[path = "../src/configuration.rs"]
 mod configuration;
 #[path = "../src/embedded_binary.rs"]
@@ -10,7 +12,7 @@ use axum::routing::get;
 use axum::Router;
 use once_cell::sync::Lazy;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use tokio::net::TcpListener;
@@ -86,6 +88,36 @@ impl Drop for DirGuard {
     }
 }
 
+fn reset_test_artifact_dir(test_name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("artifacts")
+        .join("runtime-behaviors")
+        .join(test_name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create test artifact dir");
+    dir
+}
+
+fn create_temp_test_dir(name: &str) -> PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("abs-{name}-{unique}"));
+    std::fs::create_dir_all(&dir).expect("create temp test dir");
+    dir
+}
+
+fn mirrored_export_path(base: &Path, source: &Path) -> PathBuf {
+    let mut relative = PathBuf::new();
+    for component in source.components() {
+        if let std::path::Component::Normal(part) = component {
+            relative.push(part);
+        }
+    }
+    base.join(relative)
+}
+
 fn clear_abs_env() {
     let keys: Vec<String> = std::env::vars()
         .filter_map(|(key, _)| {
@@ -102,40 +134,8 @@ fn clear_abs_env() {
     }
 }
 
-fn create_mock_browser_binary() -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("abs-cli-{unique}"));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-
-    #[cfg(windows)]
-    {
-        let path = dir.join("mock-browser.cmd");
-        std::fs::write(
-            &path,
-            "@echo off\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
-        )
-        .expect("write cmd");
-        path
-    }
-
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = dir.join("mock-browser.sh");
-        std::fs::write(
-            &path,
-            "#!/bin/sh\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\n",
-        )
-        .expect("write shell script");
-        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).expect("chmod");
-        path
-    }
+fn require_detected_browser() -> PathBuf {
+    browser_detection::find_chrome_browser().expect("expected a detected Chrome-like browser")
 }
 
 fn resolve_wrapper_executable() -> PathBuf {
@@ -402,15 +402,11 @@ fn cli_version_and_command_paths_work() {
     let missing_stderr = String::from_utf8_lossy(&missing_command_output.stderr);
     assert!(missing_stderr.contains("missing forwarded arguments"));
 
-    let mock_browser = create_mock_browser_binary();
-    std::fs::write(
-        working_dir.join(".abs"),
-        format!("browser_path = \"{}\"\n", mock_browser.display()),
-    )
-    .expect("write local .abs for cli test");
+    let browser_path = require_detected_browser();
 
     let passthrough_output = Command::new(&exe)
-        .args(["--verbose", "--command", "one", "two"])
+        .env("AGENT_BROWSER_EXECUTABLE_PATH", browser_path.as_os_str())
+        .args(["--verbose", "--command", "agent-browser", "--version"])
         .output()
         .expect("run passthrough command");
     assert!(
@@ -420,8 +416,63 @@ fn cli_version_and_command_paths_work() {
         String::from_utf8_lossy(&passthrough_output.stderr)
     );
     let passthrough_stdout = String::from_utf8_lossy(&passthrough_output.stdout);
-    assert!(passthrough_stdout.contains("one"));
-    assert!(passthrough_stdout.contains("two"));
+    assert!(passthrough_stdout.contains("agent-browser"));
+
+    clear_abs_env();
+}
+
+#[test]
+fn cli_browser_screenshot_exports_real_png() {
+    let _guard = lock_env();
+    clear_abs_env();
+
+    let clean_home = create_clean_home();
+    let _home_guard = EnvVarGuard::set("HOME", clean_home.as_os_str());
+    let artifact_dir = reset_test_artifact_dir("cli_browser_screenshot_exports_real_png");
+    let working_dir = create_temp_test_dir("runtime-cwd-screenshot");
+    let source_dir = create_temp_test_dir("runtime-shot-source");
+    let sandbox_output = artifact_dir.join("sandbox-output");
+    let screenshot_path = source_dir.join("browser-shot.png");
+    let _cwd = DirGuard::enter(&working_dir);
+
+    let exe = resolve_wrapper_executable();
+    let browser_path = require_detected_browser();
+    let screenshot_command = format!(
+        "agent-browser open about:blank && agent-browser screenshot {}",
+        screenshot_path.display()
+    );
+
+    let output = Command::new(&exe)
+        .env("AGENT_BROWSER_EXECUTABLE_PATH", browser_path.as_os_str())
+        .args([
+            "--verbose",
+            "--sandbox-output",
+            sandbox_output.to_str().expect("sandbox output utf8"),
+            "--command",
+            &screenshot_command,
+        ])
+        .output()
+        .expect("run real screenshot command");
+
+    assert!(
+        output.status.success(),
+        "real screenshot command failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let exported = mirrored_export_path(&sandbox_output, &screenshot_path);
+    assert!(
+        exported.exists(),
+        "expected exported PNG at {}",
+        exported.display()
+    );
+    let bytes = std::fs::read(&exported).expect("read exported screenshot");
+    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(
+        !screenshot_path.exists(),
+        "real fs screenshot should be moved into sandbox output"
+    );
 
     clear_abs_env();
 }

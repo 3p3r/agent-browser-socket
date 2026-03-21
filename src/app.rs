@@ -1,8 +1,9 @@
-use crate::command_args::{
-    has_passthrough_command, translate_agentic_open, translate_agentic_prompt,
-};
+use crate::bashkit_executor::{BashkitExecutor, SandboxFile, SandboxFileOrigin};
+use crate::command_args::prepare_command;
 use crate::configuration::{load_config, AppConfig, PageAgentConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
+use crate::page_agent_runtime::{run_page_agent_injection, run_page_agent_prompt};
+use crate::sandbox_files::prepare_sandbox_files;
 use crate::screenshot::capture_all_screenshots;
 use crate::server::{unregister_uri_scheme, URI_SCHEME};
 use clap::{ArgAction, CommandFactory, Parser};
@@ -21,14 +22,12 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::future::Future;
 use std::io::IsTerminal;
-use std::path::Path;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use sysuri::UriScheme;
 use tachyonfx::{fx, Duration as FxDuration, Effect, Shader};
-use tokio::process::Command;
 use tokio::sync::mpsc as tokio_mpsc;
 use url::Url;
 
@@ -53,6 +52,10 @@ struct CliArgs {
     screenshot: bool,
     #[arg(long, action = ArgAction::SetTrue)]
     verbose: bool,
+    #[arg(long)]
+    sandbox_output: Option<PathBuf>,
+    #[arg(long)]
+    sandbox_ignore: Option<PathBuf>,
     #[arg(long)]
     page_agent_model: Option<String>,
     #[arg(long)]
@@ -84,173 +87,99 @@ fn parse_cli_args(args: &[OsString]) -> Result<CliArgs, String> {
     })
 }
 
-pub fn build_page_agent_config(app_config: &AppConfig, args: &[OsString]) -> PageAgentConfig {
+pub struct ParsedCli {
+    pub mode: CliMode,
+    pub flags: CliFlags,
+}
+
+pub struct CliFlags {
+    pub verbose: bool,
+    pub sandbox_output: Option<PathBuf>,
+    pub sandbox_ignore: Option<PathBuf>,
+    pub page_agent_model: Option<String>,
+    pub page_agent_url: Option<String>,
+    pub page_agent_key: Option<String>,
+}
+
+fn split_at_command_flag(args: &[OsString]) -> (&[OsString], Option<Vec<String>>) {
+    let command_flag = OsString::from("--command");
+    match args.iter().position(|arg| arg == &command_flag) {
+        Some(index) => (
+            &args[..index],
+            Some(
+                args[index + 1..]
+                    .iter()
+                    .map(|a| a.to_string_lossy().to_string())
+                    .collect(),
+            ),
+        ),
+        None => (args, None),
+    }
+}
+
+pub fn parse_cli(args: &[OsString]) -> ParsedCli {
+    let (flags, forwarded) = split_at_command_flag(args);
+    let parsed = parse_cli_args(flags).ok();
+
+    let mode = if let Some(forwarded_args) = forwarded {
+        CliMode::Command(forwarded_args)
+    } else if let Some(ref p) = parsed {
+        if p.mcp {
+            CliMode::Mcp
+        } else if p.register_uri {
+            CliMode::RegisterUri
+        } else if p.unregister_uri {
+            CliMode::UnregisterUri
+        } else if p.clean {
+            CliMode::Clean
+        } else if p.screenshot {
+            CliMode::Screenshot
+        } else if p.version
+            || p.input
+                .as_ref()
+                .map(|value| value.to_string_lossy() == "version")
+                .unwrap_or(false)
+        {
+            CliMode::Version
+        } else if let Some(ref input) = p.input {
+            let candidate = input.to_string_lossy();
+            if candidate.contains("://") {
+                CliMode::UriLaunch(candidate.to_string())
+            } else {
+                CliMode::Serve
+            }
+        } else {
+            CliMode::Serve
+        }
+    } else {
+        CliMode::Serve
+    };
+
+    ParsedCli {
+        mode,
+        flags: CliFlags {
+            verbose: parsed.as_ref().map(|p| p.verbose).unwrap_or(false),
+            sandbox_output: parsed.as_ref().and_then(|p| p.sandbox_output.clone()),
+            sandbox_ignore: parsed.as_ref().and_then(|p| p.sandbox_ignore.clone()),
+            page_agent_model: parsed.as_ref().and_then(|p| p.page_agent_model.clone()),
+            page_agent_url: parsed.as_ref().and_then(|p| p.page_agent_url.clone()),
+            page_agent_key: parsed.as_ref().and_then(|p| p.page_agent_key.clone()),
+        },
+    }
+}
+
+pub fn build_page_agent_config(app_config: &AppConfig, flags: &CliFlags) -> PageAgentConfig {
     let mut config = app_config.page_agent.clone();
-    let command_flag = OsString::from("--command");
-    let parse_slice = if let Some(index) = args.iter().position(|arg| arg == &command_flag) {
-        &args[..index]
-    } else {
-        args
-    };
-
-    if let Ok(parsed) = parse_cli_args(parse_slice) {
-        if let Some(model) = parsed.page_agent_model {
-            config.model = model;
-        }
-        if let Some(url) = parsed.page_agent_url {
-            config.url = url;
-        }
-        if let Some(key) = parsed.page_agent_key {
-            config.key = key;
-        }
+    if let Some(ref model) = flags.page_agent_model {
+        config.model = model.clone();
     }
-
+    if let Some(ref url) = flags.page_agent_url {
+        config.url = url.clone();
+    }
+    if let Some(ref key) = flags.page_agent_key {
+        config.key = key.clone();
+    }
     config
-}
-
-pub fn parse_cli_mode(args: &[OsString]) -> CliMode {
-    let command_flag = OsString::from("--command");
-    if let Some(index) = args.iter().position(|arg| arg == &command_flag) {
-        let forwarded = args
-            .iter()
-            .skip(index + 1)
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        return CliMode::Command(forwarded);
-    }
-
-    let parsed = match parse_cli_args(args) {
-        Ok(parsed) => parsed,
-        Err(_) => return CliMode::Serve,
-    };
-
-    if parsed.mcp {
-        return CliMode::Mcp;
-    }
-
-    if parsed.register_uri {
-        return CliMode::RegisterUri;
-    }
-
-    if parsed.unregister_uri {
-        return CliMode::UnregisterUri;
-    }
-
-    if parsed.clean {
-        return CliMode::Clean;
-    }
-
-    if parsed.screenshot {
-        return CliMode::Screenshot;
-    }
-
-    if parsed.version
-        || parsed
-            .input
-            .as_ref()
-            .map(|value| value.to_string_lossy() == "version")
-            .unwrap_or(false)
-    {
-        return CliMode::Version;
-    }
-
-    if let Some(input) = parsed.input {
-        let candidate = input.to_string_lossy();
-        if candidate.contains("://") {
-            return CliMode::UriLaunch(candidate.to_string());
-        }
-    }
-
-    CliMode::Serve
-}
-
-fn parse_cli_verbose(args: &[OsString]) -> bool {
-    let command_flag = OsString::from("--command");
-    let parse_slice = if let Some(index) = args.iter().position(|arg| arg == &command_flag) {
-        &args[..index]
-    } else {
-        args
-    };
-
-    match parse_cli_args(parse_slice) {
-        Ok(parsed) => parsed.verbose,
-        Err(_) => false,
-    }
-}
-
-async fn run_page_agent_injection(
-    binary_path: &Path,
-    page_agent_config: &PageAgentConfig,
-) -> Result<i32, Box<dyn Error>> {
-    use crate::server::render_page_agent_bundle;
-
-    let bundle = render_page_agent_bundle(page_agent_config);
-    let max_chunk_bytes = 20_000;
-
-    let run_eval = |script: String| async move {
-        let status = Command::new(binary_path)
-            .arg("eval")
-            .arg(script)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await?;
-        Ok::<i32, Box<dyn Error>>(status.code().unwrap_or(1))
-    };
-
-    let init_exit = run_eval("window.__absPageAgentChunks = [];".to_string()).await?;
-    if init_exit != 0 {
-        return Ok(init_exit);
-    }
-
-    let mut chunk_start = 0;
-    while chunk_start < bundle.len() {
-        let mut chunk_end = (chunk_start + max_chunk_bytes).min(bundle.len());
-        while chunk_end > chunk_start && !bundle.is_char_boundary(chunk_end) {
-            chunk_end -= 1;
-        }
-
-        if chunk_end == chunk_start {
-            break;
-        }
-
-        let chunk = &bundle[chunk_start..chunk_end];
-        let serialized_chunk = serde_json::to_string(chunk).unwrap_or_else(|_| "\"\"".to_string());
-        let append_script = format!("window.__absPageAgentChunks.push({serialized_chunk});");
-
-        let append_exit = run_eval(append_script).await?;
-        if append_exit != 0 {
-            return Ok(append_exit);
-        }
-
-        chunk_start = chunk_end;
-    }
-
-    let finalize_script = r#"(() => {
-    if (window.PageAgent) return 'already_loaded';
-    const source = (window.__absPageAgentChunks || []).join('');
-    delete window.__absPageAgentChunks;
-    (0, eval)(source);
-    if (!window.PageAgent) throw new Error('PageAgent not found on window after eval');
-    return 'loaded';
-})()"#;
-
-    run_eval(finalize_script.to_string()).await
-}
-
-async fn run_page_agent_prompt(binary_path: &Path, prompt: &str) -> Result<i32, Box<dyn Error>> {
-    let script = crate::server::build_page_agent_prompt_script(prompt);
-    let status = Command::new(binary_path)
-        .arg("eval")
-        .arg(script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await?;
-
-    Ok(status.code().unwrap_or(1))
 }
 
 fn register_uri_scheme() -> Result<(), Box<dyn Error>> {
@@ -482,7 +411,7 @@ fn run_idle_animation_loop(
                 )));
 
                 let dashboard_host = if host == "0.0.0.0" { "localhost" } else { host };
-                let dashboard_line = format!("mcp sse: http://{dashboard_host}:{port}/mcp");
+                let dashboard_line = format!("http streaming: http://{dashboard_host}:{port}/mcp");
                 status_lines.push(Line::from(Span::styled(
                     dashboard_line,
                     Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
@@ -567,9 +496,9 @@ fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
 }
 
 pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
-    let verbose = parse_cli_verbose(&args);
+    let cli = parse_cli(&args);
 
-    match parse_cli_mode(&args) {
+    match cli.mode {
         CliMode::RegisterUri => {
             register_uri_scheme()?;
             println!("registered {}:// URI scheme", URI_SCHEME.unsecure());
@@ -591,52 +520,18 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
                 return Ok(2);
             }
 
-            let prompt = match translate_agentic_prompt(&mut forwarded_args) {
-                Ok(prompt) => prompt,
-                Err(message) => {
-                    eprintln!("{message}");
-                    return Ok(2);
-                }
-            };
-            let should_inject_page_agent = match translate_agentic_open(&mut forwarded_args) {
-                Ok(opened) => opened || prompt.is_some(),
-                Err(message) => {
-                    eprintln!("{message}");
-                    return Ok(2);
-                }
-            };
-
             let config = load_config()?;
-            let page_agent_config = build_page_agent_config(&config, &args);
+            let page_agent_config = build_page_agent_config(&config, &cli.flags);
             let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
-            let exit_code = if has_passthrough_command(&forwarded_args) {
-                run_command_passthrough(&binary_path, forwarded_args, verbose).await?
-            } else {
-                0
-            };
-
-            if should_inject_page_agent && exit_code == 0 {
-                let injection_exit_code =
-                    run_page_agent_injection(&binary_path, &page_agent_config).await?;
-                if injection_exit_code != 0 {
-                    eprintln!(
-                        "page-agent injection failed with exit code {}",
-                        injection_exit_code
-                    );
-                    return Ok(injection_exit_code);
-                }
-
-                if let Some(prompt) = prompt {
-                    let prompt_exit_code = run_page_agent_prompt(&binary_path, &prompt).await?;
-                    if prompt_exit_code != 0 {
-                        eprintln!(
-                            "page-agent prompt execution failed with exit code {}",
-                            prompt_exit_code
-                        );
-                        return Ok(prompt_exit_code);
-                    }
-                }
-            }
+            let exit_code = run_command_passthrough(
+                &binary_path,
+                std::mem::take(&mut forwarded_args),
+                cli.flags.verbose,
+                &page_agent_config,
+                cli.flags.sandbox_output.as_deref(),
+                cli.flags.sandbox_ignore.as_deref(),
+            )
+            .await?;
 
             Ok(exit_code)
         }
@@ -660,14 +555,14 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
         }
         CliMode::Mcp => {
             let config = load_config()?;
-            let page_agent_config = build_page_agent_config(&config, &args);
+            let page_agent_config = build_page_agent_config(&config, &cli.flags);
             crate::mcp::run_mcp_stdio(config, page_agent_config).await
         }
         CliMode::UriLaunch(uri) => {
             ensure_uri_scheme_registered()?;
 
             let mut config = load_config()?;
-            let page_agent_config = build_page_agent_config(&config, &args);
+            let page_agent_config = build_page_agent_config(&config, &cli.flags);
             apply_uri_overrides(&mut config, &uri)?;
 
             let (quit_tx, mut quit_rx) = tokio_mpsc::channel::<()>(1);
@@ -678,14 +573,19 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
                 }
             };
 
-            run_mcp_sse_with_shutdown_internal(config, page_agent_config, shutdown, Some(quit_tx))
-                .await?;
+            run_mcp_streamable_http_with_shutdown_internal(
+                config,
+                page_agent_config,
+                shutdown,
+                Some(quit_tx),
+            )
+            .await?;
             Ok(0)
         }
         CliMode::Serve => {
             ensure_uri_scheme_registered()?;
             let config = load_config()?;
-            let page_agent_config = build_page_agent_config(&config, &args);
+            let page_agent_config = build_page_agent_config(&config, &cli.flags);
 
             let (quit_tx, mut quit_rx) = tokio_mpsc::channel::<()>(1);
             let shutdown = async move {
@@ -695,8 +595,13 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
                 }
             };
 
-            run_mcp_sse_with_shutdown_internal(config, page_agent_config, shutdown, Some(quit_tx))
-                .await?;
+            run_mcp_streamable_http_with_shutdown_internal(
+                config,
+                page_agent_config,
+                shutdown,
+                Some(quit_tx),
+            )
+            .await?;
             Ok(0)
         }
     }
@@ -706,22 +611,116 @@ pub async fn run_command_passthrough(
     binary_path: &Path,
     forwarded_args: Vec<String>,
     verbose: bool,
+    page_agent_config: &PageAgentConfig,
+    sandbox_output: Option<&Path>,
+    sandbox_ignore: Option<&Path>,
 ) -> Result<i32, Box<dyn Error>> {
-    let mut command = Command::new(binary_path);
-    command.args(forwarded_args).stdin(Stdio::inherit());
-
-    if verbose {
-        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    let original_script = if forwarded_args.len() == 1 {
+        forwarded_args[0].clone()
     } else {
-        command.stdout(Stdio::null()).stderr(Stdio::null());
+        shlex::try_join(forwarded_args.iter().map(|part| part.as_str()))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?
+    };
+    let prepared = prepare_command(&original_script)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+
+    let executor = BashkitExecutor::new(binary_path.to_path_buf());
+    let execution = executor.execute(&prepared, None).await;
+    let stdout = execution.stdout;
+    let stderr = execution.stderr;
+    let exit_code = execution.exit_code;
+
+    if let Some(output_dir) = sandbox_output {
+        export_sandbox_files(output_dir, sandbox_ignore, &execution.files, verbose)?;
     }
 
-    let status = command.status().await?;
+    if verbose {
+        if !stdout.is_empty() {
+            print!("{stdout}");
+        }
+        if !stderr.is_empty() {
+            eprint!("{stderr}");
+        }
+    }
 
-    Ok(status.code().unwrap_or(1))
+    if prepared.should_inject_page_agent && exit_code == 0 {
+        let injection_exit = run_page_agent_injection(binary_path, page_agent_config, None)
+            .await
+            .map_err(std::io::Error::other)?;
+        if injection_exit != 0 {
+            if verbose {
+                eprintln!("page-agent injection failed with exit code {injection_exit}");
+            }
+            return Ok(injection_exit);
+        }
+
+        if let Some(prompt) = prepared.agentic_prompt.as_ref() {
+            let prompt_exit = run_page_agent_prompt(binary_path, prompt, None)
+                .await
+                .map_err(std::io::Error::other)?
+                .exit_code;
+            if prompt_exit != 0 {
+                if verbose {
+                    eprintln!("page-agent prompt execution failed with exit code {prompt_exit}");
+                }
+                return Ok(prompt_exit);
+            }
+        }
+    }
+
+    Ok(exit_code)
 }
 
-async fn run_mcp_sse_with_shutdown_internal<F>(
+fn export_sandbox_files(
+    output_dir: &Path,
+    sandbox_ignore: Option<&Path>,
+    files: &[SandboxFile],
+    verbose: bool,
+) -> Result<(), Box<dyn Error>> {
+    std::fs::create_dir_all(output_dir)?;
+    let prepared_files = prepare_sandbox_files(output_dir, sandbox_ignore, files)?;
+
+    for prepared_file in prepared_files {
+        let destination_path = output_dir.join(&prepared_file.relative_path);
+        if let Some(parent) = destination_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        export_sandbox_file(prepared_file.file, destination_path.as_path())?;
+        if verbose {
+            println!("sandbox file exported: {}", destination_path.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn export_sandbox_file(file: &SandboxFile, destination_path: &Path) -> Result<(), Box<dyn Error>> {
+    match file.origin {
+        SandboxFileOrigin::Sandbox => {
+            std::fs::write(destination_path, &file.data)?;
+        }
+        SandboxFileOrigin::RealFs => {
+            if destination_path.exists() {
+                std::fs::remove_file(destination_path)?;
+            }
+
+            match std::fs::rename(&file.path, destination_path) {
+                Ok(()) => {}
+                Err(_) => {
+                    std::fs::write(destination_path, &file.data)?;
+                    if file.path.is_file() {
+                        let _ = std::fs::remove_file(&file.path);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_mcp_streamable_http_with_shutdown_internal<F>(
     config: AppConfig,
     page_agent_config: PageAgentConfig,
     shutdown: F,
@@ -747,7 +746,8 @@ where
         );
     }
 
-    let serve_result = crate::mcp::run_mcp_sse(config, page_agent_config, shutdown).await;
+    let serve_result =
+        crate::mcp::run_mcp_streamable_http(config, page_agent_config, shutdown).await;
 
     if let Some(animation) = animation {
         animation.stop();
@@ -765,7 +765,13 @@ pub async fn run_server_with_shutdown<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    run_mcp_sse_with_shutdown_internal(config, PageAgentConfig::default(), shutdown, None).await
+    run_mcp_streamable_http_with_shutdown_internal(
+        config,
+        PageAgentConfig::default(),
+        shutdown,
+        None,
+    )
+    .await
 }
 
 pub async fn shutdown_signal() {
@@ -816,80 +822,28 @@ mod tests {
         }
     }
 
-    fn create_mock_browser_binary() -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("abs-app-{unique}"));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-
-        #[cfg(windows)]
-        {
-            let path = dir.join("mock-browser.cmd");
-            std::fs::write(
-                &path,
-                "@echo off\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
-            )
-            .expect("write cmd");
-            path
-        }
-
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let path = dir.join("mock-browser.sh");
-            std::fs::write(
-                &path,
-                "#!/bin/sh\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\n",
-            )
-            .expect("write shell script");
-            let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&path, permissions).expect("chmod");
-            path
-        }
+    fn reset_test_artifact_dir(test_name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("artifacts")
+            .join("app-tests")
+            .join(test_name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test artifact dir");
+        dir
     }
 
-    fn create_mock_browser_binary_with_eval_failure() -> PathBuf {
+    fn create_temp_test_dir(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("abs-app-eval-fail-{unique}"));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-
-        #[cfg(windows)]
-        {
-            let path = dir.join("mock-browser-eval-fail.cmd");
-            std::fs::write(
-                &path,
-                "@echo off\r\nif \"%1\"==\"eval\" exit /b 7\r\n:loop\r\nif \"%1\"==\"\" goto done\r\necho %1\r\nshift\r\ngoto loop\r\n:done\r\nexit /b 0\r\n",
-            )
-            .expect("write cmd");
-            path
-        }
-
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let path = dir.join("mock-browser-eval-fail.sh");
-            std::fs::write(
-                &path,
-                "#!/bin/sh\nif [ \"$1\" = \"eval\" ]; then\n  exit 7\nfi\nfor arg in \"$@\"; do\n  echo \"$arg\"\ndone\n",
-            )
-            .expect("write shell script");
-            let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&path, permissions).expect("chmod");
-            path
-        }
+        let dir = std::env::temp_dir().join(format!("abs-{name}-{unique}"));
+        std::fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
     }
 
     #[test]
-    fn parse_cli_mode_prefers_command_over_version() {
+    fn parse_cli_prefers_command_over_version() {
         let args = vec![
             OsString::from("--version"),
             OsString::from("--command"),
@@ -897,54 +851,55 @@ mod tests {
         ];
 
         assert_eq!(
-            parse_cli_mode(&args),
+            parse_cli(&args).mode,
             CliMode::Command(vec!["open".to_string()])
         );
     }
 
     #[test]
-    fn parse_cli_mode_recognizes_version_aliases() {
+    fn parse_cli_recognizes_version_aliases() {
         assert_eq!(
-            parse_cli_mode(&[OsString::from("--version")]),
+            parse_cli(&[OsString::from("--version")]).mode,
             CliMode::Version
         );
-        assert_eq!(parse_cli_mode(&[OsString::from("-V")]), CliMode::Version);
+        assert_eq!(parse_cli(&[OsString::from("-V")]).mode, CliMode::Version);
         assert_eq!(
-            parse_cli_mode(&[OsString::from("version")]),
+            parse_cli(&[OsString::from("version")]).mode,
             CliMode::Version
         );
-        assert_eq!(parse_cli_mode(&[OsString::from("--clean")]), CliMode::Clean);
+        assert_eq!(parse_cli(&[OsString::from("--clean")]).mode, CliMode::Clean);
         assert_eq!(
-            parse_cli_mode(&[OsString::from("--screenshot")]),
+            parse_cli(&[OsString::from("--screenshot")]).mode,
             CliMode::Screenshot
         );
-        assert_eq!(parse_cli_mode(&[OsString::from("--mcp")]), CliMode::Mcp);
+        assert_eq!(parse_cli(&[OsString::from("--mcp")]).mode, CliMode::Mcp);
         assert_eq!(
-            parse_cli_mode(&[OsString::from("--register-uri")]),
+            parse_cli(&[OsString::from("--register-uri")]).mode,
             CliMode::RegisterUri
         );
         assert_eq!(
-            parse_cli_mode(&[OsString::from("--unregister-uri")]),
+            parse_cli(&[OsString::from("--unregister-uri")]).mode,
             CliMode::UnregisterUri
         );
         assert_eq!(
-            parse_cli_mode(&[OsString::from("abs://open?port=9876")]),
+            parse_cli(&[OsString::from("abs://open?port=9876")]).mode,
             CliMode::UriLaunch("abs://open?port=9876".to_string())
         );
-        assert_eq!(parse_cli_mode(&[OsString::from("serve")]), CliMode::Serve);
+        assert_eq!(parse_cli(&[OsString::from("serve")]).mode, CliMode::Serve);
     }
 
     #[test]
-    fn parse_cli_mode_ignores_page_agent_url_values_for_uri_detection() {
+    fn parse_cli_ignores_page_agent_url_values_for_uri_detection() {
         assert_eq!(
-            parse_cli_mode(&[
+            parse_cli(&[
                 OsString::from("--page-agent-url"),
                 OsString::from("http://localhost:11434/v1")
-            ]),
+            ])
+            .mode,
             CliMode::Serve
         );
         assert_eq!(
-            parse_cli_mode(&[OsString::from("--page-agent-url=http://localhost:11434/v1")]),
+            parse_cli(&[OsString::from("--page-agent-url=http://localhost:11434/v1")]).mode,
             CliMode::Serve
         );
     }
@@ -952,16 +907,14 @@ mod tests {
     #[test]
     fn build_page_agent_config_supports_split_and_equals_forms() {
         let app_config = AppConfig::default();
-        let parsed = build_page_agent_config(
-            &app_config,
-            &[
-                OsString::from("--page-agent-model"),
-                OsString::from("my-model"),
-                OsString::from("--page-agent-url=http://127.0.0.1:5000/v1"),
-                OsString::from("--page-agent-key"),
-                OsString::from("secret-key"),
-            ],
-        );
+        let cli = parse_cli(&[
+            OsString::from("--page-agent-model"),
+            OsString::from("my-model"),
+            OsString::from("--page-agent-url=http://127.0.0.1:5000/v1"),
+            OsString::from("--page-agent-key"),
+            OsString::from("secret-key"),
+        ]);
+        let parsed = build_page_agent_config(&app_config, &cli.flags);
 
         assert_eq!(parsed.model, "my-model");
         assert_eq!(parsed.url, "http://127.0.0.1:5000/v1");
@@ -975,14 +928,12 @@ mod tests {
         app_config.page_agent.url = "http://env.local/v1".to_string();
         app_config.page_agent.key = "env-key".to_string();
 
-        let parsed = build_page_agent_config(
-            &app_config,
-            &[
-                OsString::from("--page-agent-model"),
-                OsString::from("cli-model"),
-                OsString::from("--page-agent-url=http://cli.local/v1"),
-            ],
-        );
+        let cli = parse_cli(&[
+            OsString::from("--page-agent-model"),
+            OsString::from("cli-model"),
+            OsString::from("--page-agent-url=http://cli.local/v1"),
+        ]);
+        let parsed = build_page_agent_config(&app_config, &cli.flags);
 
         assert_eq!(parsed.model, "cli-model");
         assert_eq!(parsed.url, "http://cli.local/v1");
@@ -991,14 +942,50 @@ mod tests {
 
     #[test]
     fn parse_cli_verbose_defaults_off_and_enables_with_flag() {
-        assert!(!parse_cli_verbose(&[]));
-        assert!(parse_cli_verbose(&[OsString::from("--verbose")]));
-        assert!(parse_cli_verbose(&[
-            OsString::from("--verbose"),
+        assert!(!parse_cli(&[]).flags.verbose);
+        assert!(parse_cli(&[OsString::from("--verbose")]).flags.verbose);
+        assert!(
+            parse_cli(&[
+                OsString::from("--verbose"),
+                OsString::from("--command"),
+                OsString::from("open"),
+                OsString::from("https://example.com")
+            ])
+            .flags
+            .verbose
+        );
+    }
+
+    #[test]
+    fn parse_cli_sandbox_output_reads_flag_before_command() {
+        let cli = parse_cli(&[
+            OsString::from("--sandbox-output"),
+            OsString::from("/tmp/abs-sandbox"),
             OsString::from("--command"),
-            OsString::from("open"),
-            OsString::from("https://example.com")
-        ]));
+            OsString::from("echo"),
+            OsString::from("hello"),
+        ]);
+
+        assert_eq!(
+            cli.flags.sandbox_output,
+            Some(PathBuf::from("/tmp/abs-sandbox"))
+        );
+    }
+
+    #[test]
+    fn parse_cli_sandbox_ignore_reads_flag_before_command() {
+        let cli = parse_cli(&[
+            OsString::from("--sandbox-ignore"),
+            OsString::from("/tmp/abs-ignore"),
+            OsString::from("--command"),
+            OsString::from("echo"),
+            OsString::from("hello"),
+        ]);
+
+        assert_eq!(
+            cli.flags.sandbox_ignore,
+            Some(PathBuf::from("/tmp/abs-ignore"))
+        );
     }
 
     #[test]
@@ -1048,31 +1035,18 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         clear_abs_env();
-        let mock_browser = create_mock_browser_binary();
 
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let home = std::env::temp_dir().join(format!("abs-app-home-{unique}"));
-        let cwd = std::env::temp_dir().join(format!("abs-app-cwd-{unique}"));
-        std::fs::create_dir_all(&home).expect("create home");
-        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let home = create_temp_test_dir("app-home-passthrough");
+        let cwd = create_temp_test_dir("app-cwd-passthrough");
 
         let original_home: Option<OsString> = std::env::var_os("HOME");
         std::env::set_var("HOME", &home);
         let _cwd_guard = DirGuard::enter(&cwd);
 
-        std::fs::write(
-            cwd.join(".abs"),
-            format!("browser_path = \"{}\"\n", mock_browser.display()),
-        )
-        .expect("write .abs");
-
         let result = run_with_args(vec![
             OsString::from("--command"),
-            OsString::from("one"),
-            OsString::from("two"),
+            OsString::from("agent-browser"),
+            OsString::from("--version"),
         ])
         .await
         .expect("run passthrough");
@@ -1089,42 +1063,122 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_args_agentic_open_fails_when_injection_fails() {
+    async fn run_with_args_command_exports_sandbox_files() {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         clear_abs_env();
-        let mock_browser = create_mock_browser_binary_with_eval_failure();
 
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let home = std::env::temp_dir().join(format!("abs-app-home-strict-{unique}"));
-        let cwd = std::env::temp_dir().join(format!("abs-app-cwd-strict-{unique}"));
-        std::fs::create_dir_all(&home).expect("create home");
-        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let artifact_dir = reset_test_artifact_dir("run_with_args_command_exports_sandbox_files");
+        let home = create_temp_test_dir("app-home-export");
+        let cwd = create_temp_test_dir("app-cwd-export");
+        let sandbox_output = artifact_dir.join("sandbox-output");
 
         let original_home: Option<OsString> = std::env::var_os("HOME");
         std::env::set_var("HOME", &home);
         let _cwd_guard = DirGuard::enter(&cwd);
 
-        std::fs::write(
-            cwd.join(".abs"),
-            format!("browser_path = \"{}\"\n", mock_browser.display()),
-        )
-        .expect("write .abs");
-
         let result = run_with_args(vec![
+            OsString::from("--sandbox-output"),
+            sandbox_output.as_os_str().to_os_string(),
             OsString::from("--command"),
-            OsString::from("agentic-open"),
-            OsString::from("https://example.com"),
+            OsString::from("echo hello > /report.txt"),
         ])
         .await
         .expect("run passthrough");
 
-        assert_eq!(result, 7);
+        assert_eq!(result, 0);
+        let exported_file = sandbox_output.join("report.txt");
+        let exported_data = std::fs::read_to_string(exported_file).expect("read exported file");
+        assert_eq!(exported_data, "hello\n");
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        clear_abs_env();
+    }
+
+    #[tokio::test]
+    async fn run_with_args_supports_basic_shell_commands() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        clear_abs_env();
+
+        let artifact_dir = reset_test_artifact_dir("run_with_args_supports_basic_shell_commands");
+        let home = create_temp_test_dir("app-home-shell-basic");
+        let cwd = create_temp_test_dir("app-cwd-shell-basic");
+        let sandbox_output = artifact_dir.join("sandbox-output");
+
+        let original_home: Option<OsString> = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let _cwd_guard = DirGuard::enter(&cwd);
+
+        let result = run_with_args(vec![
+            OsString::from("--sandbox-output"),
+            sandbox_output.as_os_str().to_os_string(),
+            OsString::from("--command"),
+            OsString::from("name=world && echo hello-$name | cat > /report.txt"),
+        ])
+        .await
+        .expect("run basic shell command");
+
+        assert_eq!(result, 0);
+        let exported_file = sandbox_output.join("report.txt");
+        let exported_data = std::fs::read_to_string(exported_file).expect("read exported file");
+        assert_eq!(exported_data, "hello-world\n");
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        clear_abs_env();
+    }
+
+    #[tokio::test]
+    async fn run_with_args_applies_sandbox_ignore_filters() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        clear_abs_env();
+
+        let artifact_dir = reset_test_artifact_dir("run_with_args_applies_sandbox_ignore_filters");
+        let home = create_temp_test_dir("app-home-ignore");
+        let cwd = create_temp_test_dir("app-cwd-ignore");
+        let sandbox_output = artifact_dir.join("sandbox-output");
+        let sandbox_ignore = create_temp_test_dir("app-ignore-file").join("sandbox.ignore");
+
+        let original_home: Option<OsString> = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let _cwd_guard = DirGuard::enter(&cwd);
+
+        std::fs::write(&sandbox_ignore, "*.log\n").expect("write sandbox ignore");
+
+        let result = run_with_args(vec![
+            OsString::from("--sandbox-output"),
+            sandbox_output.as_os_str().to_os_string(),
+            OsString::from("--sandbox-ignore"),
+            sandbox_ignore.as_os_str().to_os_string(),
+            OsString::from("--command"),
+            OsString::from(
+                "echo keep > /keep.txt && echo hidden > /.DS_Store && echo noisy > /trace.log",
+            ),
+        ])
+        .await
+        .expect("run passthrough");
+
+        assert_eq!(result, 0);
+        assert!(sandbox_output.join("keep.txt").exists());
+        assert!(!sandbox_output.join(".DS_Store").exists());
+        assert!(!sandbox_output.join("trace.log").exists());
 
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);
@@ -1137,12 +1191,11 @@ mod tests {
 
     #[tokio::test]
     async fn run_server_with_shutdown_starts_and_exits_cleanly() {
-        let mock_browser = create_mock_browser_binary();
         let config = AppConfig {
             auth_url: None,
             port: 0,
             host: "127.0.0.1".to_string(),
-            browser_path: Some(mock_browser.to_string_lossy().to_string()),
+            browser_path: None,
             page_agent: PageAgentConfig::default(),
         };
 
@@ -1155,12 +1208,11 @@ mod tests {
 
     #[tokio::test]
     async fn run_server_with_shutdown_returns_error_for_invalid_bind_host() {
-        let mock_browser = create_mock_browser_binary();
         let config = AppConfig {
             auth_url: None,
             port: 9607,
             host: "256.256.256.256".to_string(),
-            browser_path: Some(mock_browser.to_string_lossy().to_string()),
+            browser_path: None,
             page_agent: PageAgentConfig::default(),
         };
 

@@ -11,7 +11,7 @@ Swiss Army Knife tool that bridges web apps to browser automation via [agent-bro
 
 Your web app connects to `abs://` → `abs` controls browser on your machine.
 
-This project adds helpful automation features and MCP server modes (SSE + stdio) to the core `agent-browser` experience, all in a single self-contained binary.
+This project adds helpful automation features and MCP server modes (streamable HTTP + stdio) to the core `agent-browser` experience, all in a single self-contained binary.
 
 ---
 
@@ -35,7 +35,7 @@ chmod +x ./agent-browser-server-*
 
 > **Mac users**: xattr -d com.apple.quarantine ./agent-browser-server-mac to run the binary after downloading from the Internet.
 
-**3. Connect** to MCP SSE at `http://localhost:9607/mcp`
+**3. Connect** to MCP Streamable HTTP at `http://localhost:9607/mcp`
 
 ---
 
@@ -71,7 +71,65 @@ CLI flags always override file and env var configuration.
 
 ---
 
-## Common Commands
+## MCP Command Tool
+
+The `command` tool accepts any bash script with `agent-browser` available as a function. Basic shell simulation works too, including variable assignment and expansion, pipes, redirections, stdin, and command chaining.
+
+```json
+{
+  "tool": "command",
+  "input": {
+    "command": "agent-browser open https://github.com",
+    "env": {}
+  }
+}
+```
+
+Use this mode when you want full shell behavior (`|`, `&&`, `>`, command substitution, etc.).
+Synthetic commands `agentic-open` and `agentic-prompt` are handled by this server (they are translated before calling `agent-browser`).
+
+### Examples
+
+**Screenshot with redirection:**
+```json
+{
+  "command": "agent-browser snapshot -i > /tmp/screenshot.json && cat /tmp/screenshot.json"
+}
+```
+
+**Pipes and stdin:**
+```json
+{
+  "command": "echo 'mypassword' | agent-browser auth save github --url https://github.com/login --username myuser --password-stdin"
+}
+```
+
+**Basic shell flow:**
+```json
+{
+  "command": "name=world && echo hello-$name | cat && echo saved-$name > /tmp/report.txt"
+}
+```
+
+**Complex bash pipelines:**
+```json
+{
+  "command": "agent-browser open https://example.com && agent-browser click 'button' | jq '.selector'"
+}
+```
+
+**Synthetic command translation:**
+```json
+{
+  "command": "agent-browser agentic-open https://google.com"
+}
+```
+
+---
+
+## CLI Commands
+
+`--command` supports full shell command strings, like MCP `command`, including basic shell simulation such as variables, pipelines, redirection, and command chaining.
 
 ```bash
 # Show version
@@ -80,17 +138,23 @@ CLI flags always override file and env var configuration.
 # Register abs:// URL handler
 ./agent-browser-server-* --register-uri
 
-# Pass commands to agent-browser
-./agent-browser-server-* --verbose --command --version
+# Run a full shell command (same behavior as MCP command tool)
+./agent-browser-server-* --verbose --command "agent-browser open https://google.com"
 
-# Open a URL with Page Agent injected
-./agent-browser-server-* --verbose --command --headed agentic-open https://google.com
+# Use pipes/stdin in CLI mode
+./agent-browser-server-* --verbose --command "echo 'mypassword' | agent-browser auth save github --url https://github.com/login --username myuser --password-stdin"
 
-# Open Google, inject Page Agent, and submit a prompt
-./agent-browser-server-* --verbose --command --headed agentic-prompt https://google.com "search for rust async patterns"
+# Use basic shell flow in CLI mode
+./agent-browser-server-* --verbose --command "name=world && echo hello-$name | cat > /report.txt"
 
-# Submit a prompt to Page Agent on the current page (no URL)
-./agent-browser-server-* --verbose --command agentic-prompt "search for rust async patterns"
+# Open a URL with Page Agent injected (synthetic command translation)
+./agent-browser-server-* --verbose --command "agent-browser agentic-open https://google.com"
+
+# Open Google, inject Page Agent, and submit a prompt (synthetic command translation)
+./agent-browser-server-* --verbose --command "agent-browser agentic-prompt https://google.com 'search for rust async patterns'"
+
+# Submit a prompt to Page Agent on the current page (no URL, synthetic command translation)
+./agent-browser-server-* --verbose --command "agent-browser agentic-prompt 'search for rust async patterns'"
 
 # Clean cached browser binary
 ./agent-browser-server-* --clean
@@ -100,6 +164,24 @@ CLI flags always override file and env var configuration.
 ```
 
 `--verbose` shows browser stdout/stderr (suppressed by default). `--headed` opens a visible browser window.
+
+### Sandbox File Output
+
+Files created during command execution (both in the sandboxed shell and by `agent-browser` on the real filesystem) are automatically detected.
+
+- **MCP mode**: Detected files are exposed as `resource://file/{id}` MCP resources alongside the command response.
+- **CLI mode**: Use `--sandbox-output <dir>` to sync detected files into a directory.
+
+When a command creates a new real filesystem file such as `/tmp/report.png`, the wrapper syncs it into `--sandbox-output` and removes the original temp file when possible. In-memory sandbox files are written directly to the output directory.
+
+Sync-back filtering uses built-in ignore rules for common junk such as VCS metadata, editor swap files, and OS noise. You can layer additional gitignore-style patterns from a real file on disk with `--sandbox-ignore <path>`.
+
+```bash
+./agent-browser-server-* --sandbox-output ./output --command "agent-browser snapshot -i > /tmp/screenshot.json"
+
+# Add custom ignore patterns on top of the built-in defaults
+./agent-browser-server-* --sandbox-output ./output --sandbox-ignore .sandbox-ignore --command "echo keep > /keep.txt && echo noise > /trace.log"
+```
 
 ---
 
@@ -119,11 +201,11 @@ Register with `--register-uri`, then open URLs:
 - `abs://open?port=9911`
 - `abs://open?port=9911&host=127.0.0.1`
 
-**Behavior:** Auto-starts MCP SSE server on configured host/port and keeps running until shutdown.
+**Behavior:** Auto-starts MCP Streamable HTTP server on configured host/port and keeps running until shutdown.
 
 ### Page Agent Runtime Flags
 
-Use these startup flags to control the embedded Page Agent bundle values served at `/assets/page-agent.demo.js`:
+Use these startup flags to configure Page Agent behavior:
 
 - `--page-agent-model` (default: `qwen3.5-plus`)
 - `--page-agent-url` (default: `http://localhost:11434/v1`)
@@ -154,37 +236,15 @@ Run as MCP stdio server:
 
 `health`, `version`, `shutdown`, `screenshot_system`, `command`, `delete_resource`, `delete_all_resources`
 
-Default server mode (`./agent-browser-server-*`) runs MCP over SSE at `/mcp`.
+Default server mode (`./agent-browser-server-*`) runs MCP over streamable HTTP at `/mcp`.
 
-### MCP Resources for Screenshots and PDFs
+### Synthetic Commands
 
-The MCP server now exposes generated image/PDF outputs as MCP Resources with `resource://` URIs.
+The following convenience commands are supported in command mode:
 
-- `screenshot_system` creates one resource per monitor screenshot and returns `resource_link` content with each resource URI.
-- `command` intercepts successful `agent-browser screenshot ...` and `agent-browser pdf ...` calls; when output files are produced, their bytes are stored as MCP Resources and returned as `resource_link` content.
-- Resources are available through `resources/list` and `resources/read`.
-- Generated resources are in-memory (session/server lifetime) and are cleared on process restart.
-
-Cleanup tools:
-
-- `delete_resource` removes a single generated resource by URI.
-- `delete_all_resources` removes all generated resources currently in memory.
-
-### Automatic `--executable-path` Prefill
-
-For MCP `command` calls (stdio and SSE):
-
-- If `--executable-path` is missing, the server appends `--executable-path=<detected_path>` automatically.
-- If the caller already passes `--executable-path` (either `--executable-path=/x` or `--executable-path /x`), the server does not override it.
-- If detection fails and no automatic `--executable-path` can be injected, run `agent-browser-server --command install` to install a browser through this binary.
-
-### Synthetic `agentic-open` Command
-
-`agentic-open <url>` translates to `open <url>` and injects Page Agent after a successful open.
-
-### Synthetic `agentic-prompt` Command
-
-`agentic-prompt <url> <prompt>` — opens the URL, injects Page Agent, then submits the prompt.
+- `agent-browser agentic-open <url>`
+- `agent-browser agentic-prompt <url> <prompt>`
+- `agent-browser agentic-prompt <prompt>`
 
 **MCP client config:**
 ```json

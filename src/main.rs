@@ -1,9 +1,12 @@
 mod app;
+mod bashkit_executor;
 mod browser_detection;
 mod command_args;
 mod configuration;
 mod embedded_binary;
 mod mcp;
+mod page_agent_runtime;
+mod sandbox_files;
 mod screenshot;
 mod server;
 

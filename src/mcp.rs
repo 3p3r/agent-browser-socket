@@ -1,11 +1,13 @@
-use crate::command_args::{
-    build_args, ensure_executable_path_arg, has_passthrough_command, translate_agentic_open,
-    translate_agentic_prompt, ExecutablePathPrefill,
-};
+use crate::bashkit_executor::BashkitExecutor;
+use crate::command_args::prepare_command;
 use crate::configuration::{AppConfig, PageAgentConfig};
 use crate::embedded_binary::resolve_binary_path;
+use crate::page_agent_runtime::{run_page_agent_injection, run_page_agent_prompt};
+use crate::sandbox_files::prepare_sandbox_files;
 use crate::screenshot::capture_all_screenshots;
-use axum::response::Html;
+use axum::extract::Path as AxumPath;
+use axum::http::{header, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
@@ -28,22 +30,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::process::Stdio as ProcessStdio;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::fs;
-use tokio::process::Command;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer, ExposeHeaders};
 use uuid::Uuid;
 
 const ADMIN_DASHBOARD_HTML: &str = include_str!("admin_dashboard.html");
+include!(concat!(env!("OUT_DIR"), "/skills_manifest.rs"));
 
 type ResourceStore = Arc<RwLock<HashMap<String, ResourceEntry>>>;
 
 #[derive(Clone)]
 struct ResourceEntry {
     name: String,
+    source_path: String,
     mime_type: String,
     data: Vec<u8>,
     created_at_unix_ms: u128,
@@ -56,181 +57,19 @@ fn current_unix_ms() -> u128 {
         .unwrap_or(0)
 }
 
-fn extension_to_mime(extension: &str) -> &'static str {
-    match extension.to_ascii_lowercase().as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "pdf" => "application/pdf",
-        _ => "application/octet-stream",
-    }
-}
-
-fn sanitize_path_token(token: &str) -> &str {
-    token.trim_matches(|ch| {
-        ch == '"' || ch == '\'' || ch == '(' || ch == ')' || ch == '[' || ch == ']' || ch == ','
-    })
-}
-
-fn parse_option_value(args: &[String], key: &str) -> Option<String> {
-    for (index, arg) in args.iter().enumerate() {
-        if arg == key {
-            if let Some(value) = args.get(index + 1) {
-                return Some(value.clone());
-            }
-        }
-        if let Some(value) = arg.strip_prefix(&(key.to_string() + "=")) {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn first_positional_index(args: &[String]) -> Option<usize> {
-    args.iter().position(|arg| !arg.starts_with('-'))
-}
-
-fn command_path_from_args(args: &[String], command_index: usize) -> Option<PathBuf> {
-    let mut index = command_index + 1;
-    while index < args.len() {
-        let arg = &args[index];
-        if arg == "--screenshot-dir"
-            || arg == "--screenshot-format"
-            || arg == "--screenshot-quality"
-            || arg == "--executable-path"
-        {
-            index += 2;
-            continue;
-        }
-
-        if arg.starts_with("--screenshot-dir=")
-            || arg.starts_with("--screenshot-format=")
-            || arg.starts_with("--screenshot-quality=")
-            || arg.starts_with("--executable-path=")
-        {
-            index += 1;
-            continue;
-        }
-
-        if arg.starts_with('-') {
-            index += 1;
-            continue;
-        }
-
-        return Some(PathBuf::from(arg));
-    }
-    None
-}
-
-fn find_existing_path_in_stdout(stdout: &str, extensions: &[&str]) -> Option<PathBuf> {
-    let allowed: Vec<String> = extensions
-        .iter()
-        .map(|ext| ext.to_ascii_lowercase())
-        .collect();
-    for raw_token in stdout.split_whitespace() {
-        let token = sanitize_path_token(raw_token);
-        if token.is_empty() {
-            continue;
-        }
-        let path = PathBuf::from(token);
-        if !path.is_file() {
-            continue;
-        }
-        let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if allowed
-            .iter()
-            .any(|candidate| candidate == &ext.to_ascii_lowercase())
-        {
-            return Some(path);
-        }
-    }
-    None
-}
-
-async fn run_page_agent_injection(
-    binary_path: &Path,
-    page_agent_config: &PageAgentConfig,
-    command_env: Option<&HashMap<String, String>>,
-) -> Result<i32, String> {
-    let bundle = crate::server::render_page_agent_bundle(page_agent_config);
-    let max_chunk_bytes = 20_000;
-
-    let run_eval = |script: String| async move {
-        let mut command = Command::new(binary_path);
-        command
-            .arg("eval")
-            .arg(script)
-            .stdout(ProcessStdio::piped())
-            .stderr(ProcessStdio::piped());
-
-        if let Some(env) = command_env {
-            command.envs(env);
-        }
-
-        let output = command
-            .output()
-            .await
-            .map_err(|error| format!("failed to spawn page-agent eval: {error}"))?;
-
-        Ok::<i32, String>(output.status.code().unwrap_or(-1))
-    };
-
-    let init_exit = run_eval("window.__absPageAgentChunks = [];".to_string()).await?;
-    if init_exit != 0 {
-        return Ok(init_exit);
-    }
-
-    let mut chunk_start = 0;
-    while chunk_start < bundle.len() {
-        let mut chunk_end = (chunk_start + max_chunk_bytes).min(bundle.len());
-        while chunk_end > chunk_start && !bundle.is_char_boundary(chunk_end) {
-            chunk_end -= 1;
-        }
-
-        if chunk_end == chunk_start {
-            break;
-        }
-
-        let chunk = &bundle[chunk_start..chunk_end];
-        let serialized_chunk = serde_json::to_string(chunk).unwrap();
-        let append_script = format!("window.__absPageAgentChunks.push({serialized_chunk});");
-
-        let append_exit = run_eval(append_script).await?;
-        if append_exit != 0 {
-            return Ok(append_exit);
-        }
-
-        chunk_start = chunk_end;
-    }
-
-    let finalize_script = r#"(() => {
-    if (window.PageAgent) return 'already_loaded';
-    const source = (window.__absPageAgentChunks || []).join('');
-    delete window.__absPageAgentChunks;
-    (0, eval)(source);
-    if (!window.PageAgent) throw new Error('PageAgent not found on window after eval');
-    return 'loaded';
-})()"#;
-
-    run_eval(finalize_script.to_string()).await
-}
-
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SystemScreenshotInput {}
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CommandInput {
-    /// Shell-quoted command string to parse
-    #[serde(default)]
-    pub command: Option<String>,
-    /// Command arguments as array
-    #[serde(default)]
-    pub args: Option<Vec<String>>,
-    /// Environment variables to set
+    /// Bash script to execute with agent-browser available as a function
+    pub command: String,
+    /// Optional environment variables
     #[serde(default)]
     pub env: Option<HashMap<String, String>>,
+    /// Optional gitignore-style file used when filtering detected files before creating resources
+    #[serde(default)]
+    pub sandbox_ignore: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -244,9 +83,9 @@ pub struct DeleteAllResourcesInput {}
 #[derive(Clone)]
 pub struct SystemMcpServer {
     binary_path: PathBuf,
-    detected_browser_path: Option<PathBuf>,
     page_agent_config: PageAgentConfig,
     resource_store: ResourceStore,
+    executor: BashkitExecutor,
     tool_router: ToolRouter<Self>,
 }
 
@@ -256,6 +95,7 @@ impl SystemMcpServer {
         &self,
         kind: &str,
         name: String,
+        source_path: String,
         mime_type: String,
         data: Vec<u8>,
     ) -> RawResource {
@@ -263,6 +103,7 @@ impl SystemMcpServer {
         let uri = format!("resource://{kind}/{}", Uuid::new_v4());
         let entry = ResourceEntry {
             name: name.clone(),
+            source_path,
             mime_type: mime_type.clone(),
             data,
             created_at_unix_ms: current_unix_ms(),
@@ -275,80 +116,17 @@ impl SystemMcpServer {
             .with_size(size.min(u32::MAX as usize) as u32)
     }
 
-    async fn maybe_capture_command_output_resource(
-        &self,
-        arguments: &[String],
-        stdout: &str,
-    ) -> Option<RawResource> {
-        let command_index = first_positional_index(arguments)?;
-        let command_name = arguments.get(command_index)?.as_str();
-
-        if command_name == "screenshot" {
-            let requested_format = parse_option_value(arguments, "--screenshot-format")
-                .unwrap_or_else(|| "png".to_string());
-            let explicit_path = command_path_from_args(arguments, command_index);
-            let mut candidate_path = explicit_path.filter(|path| path.is_file());
-
-            if candidate_path.is_none() {
-                candidate_path =
-                    find_existing_path_in_stdout(stdout, &["png", "jpg", "jpeg", "webp"]);
-            }
-
-            let path = candidate_path?;
-            let data = fs::read(&path).await.ok()?;
-            let extension = path
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or(&requested_format);
-            let mime = extension_to_mime(extension).to_string();
-            let name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("screenshot")
-                .to_string();
-
-            return Some(
-                self.create_resource_with_size("screenshot", name, mime, data)
-                    .await,
-            );
-        }
-
-        if command_name == "pdf" {
-            let explicit_path = command_path_from_args(arguments, command_index);
-            let mut candidate_path = explicit_path.filter(|path| path.is_file());
-
-            if candidate_path.is_none() {
-                candidate_path = find_existing_path_in_stdout(stdout, &["pdf"]);
-            }
-
-            let path = candidate_path?;
-            let data = fs::read(&path).await.ok()?;
-            let name = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("document.pdf")
-                .to_string();
-
-            return Some(
-                self.create_resource_with_size("pdf", name, "application/pdf".to_string(), data)
-                    .await,
-            );
-        }
-
-        None
-    }
-
     fn new(
         binary_path: PathBuf,
-        detected_browser_path: Option<PathBuf>,
         page_agent_config: PageAgentConfig,
         resource_store: ResourceStore,
     ) -> Self {
+        let executor = BashkitExecutor::new(binary_path.clone());
         Self {
             binary_path,
-            detected_browser_path,
             page_agent_config,
             resource_store,
+            executor,
             tool_router: Self::tool_router(),
         }
     }
@@ -403,7 +181,13 @@ impl SystemMcpServer {
             })?;
             let name = format!("system-monitor-{index}.png");
             let resource = self
-                .create_resource_with_size("screenshot", name, "image/png".to_string(), data)
+                .create_resource_with_size(
+                    "screenshot",
+                    name,
+                    format!("system-monitor-{index}.png"),
+                    "image/png".to_string(),
+                    data,
+                )
                 .await;
             contents.push(Content::resource_link(resource));
         }
@@ -413,49 +197,21 @@ impl SystemMcpServer {
 
     #[tool(
         name = "command",
-        description = "Execute agent-browser with custom arguments"
+        description = "Execute a bash script with agent-browser available"
     )]
     async fn command(
         &self,
         Parameters(input): Parameters<CommandInput>,
     ) -> Result<CallToolResult, McpError> {
-        let mut arguments = build_args(&input.command, &input.args)
-            .map_err(|msg| McpError::invalid_params(msg, None))?;
+        let prepared =
+            prepare_command(&input.command).map_err(|msg| McpError::invalid_params(msg, None))?;
 
-        let agentic_prompt = translate_agentic_prompt(&mut arguments)
-            .map_err(|msg| McpError::invalid_params(msg, None))?;
-        let should_inject_page_agent = translate_agentic_open(&mut arguments)
-            .map_err(|msg| McpError::invalid_params(msg, None))?
-            || agentic_prompt.is_some();
+        let execution = self.executor.execute(&prepared, input.env.as_ref()).await;
+        let stdout = execution.stdout;
+        let stderr = execution.stderr;
+        let exit_code = execution.exit_code;
 
-        let prefill =
-            ensure_executable_path_arg(&mut arguments, self.detected_browser_path.as_deref());
-
-        let (stdout, stderr, exit_code) = if has_passthrough_command(&arguments) {
-            let mut command = Command::new(&self.binary_path);
-            command
-                .args(&arguments)
-                .stdout(ProcessStdio::piped())
-                .stderr(ProcessStdio::piped());
-
-            if let Some(env) = &input.env {
-                command.envs(env);
-            }
-
-            let output = command.output().await.map_err(|e| {
-                McpError::internal_error(format!("failed to spawn process: {}", e), None)
-            })?;
-
-            (
-                String::from_utf8_lossy(&output.stdout).to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
-                output.status.code().unwrap_or(-1),
-            )
-        } else {
-            (String::new(), String::new(), 0)
-        };
-
-        let page_agent_injection = if should_inject_page_agent && exit_code == 0 {
+        let page_agent_injection = if prepared.should_inject_page_agent && exit_code == 0 {
             match run_page_agent_injection(
                 &self.binary_path,
                 &self.page_agent_config,
@@ -465,27 +221,22 @@ impl SystemMcpServer {
             {
                 Ok(injection_exit) => {
                     let prompt_output = if injection_exit == 0 {
-                        if let Some(prompt) = agentic_prompt.as_ref() {
-                            let mut prompt_command = Command::new(&self.binary_path);
-                            prompt_command
-                                .arg("eval")
-                                .arg(crate::server::build_page_agent_prompt_script(prompt))
-                                .stdout(ProcessStdio::piped())
-                                .stderr(ProcessStdio::piped());
-
-                            if let Some(env) = &input.env {
-                                prompt_command.envs(env);
-                            }
-
-                            match prompt_command.output().await {
+                        if let Some(prompt) = prepared.agentic_prompt.as_ref() {
+                            match run_page_agent_prompt(
+                                &self.binary_path,
+                                prompt,
+                                input.env.as_ref(),
+                            )
+                            .await
+                            {
                                 Ok(prompt_result) => Some(serde_json::json!({
-                                    "stdout": String::from_utf8_lossy(&prompt_result.stdout),
-                                    "stderr": String::from_utf8_lossy(&prompt_result.stderr),
-                                    "exit_code": prompt_result.status.code().unwrap_or(-1)
+                                    "stdout": prompt_result.stdout,
+                                    "stderr": prompt_result.stderr,
+                                    "exit_code": prompt_result.exit_code
                                 })),
                                 Err(error) => Some(serde_json::json!({
                                     "stdout": "",
-                                    "stderr": format!("failed to spawn page-agent prompt eval: {error}"),
+                                    "stderr": error,
                                     "exit_code": -1
                                 })),
                             }
@@ -513,34 +264,44 @@ impl SystemMcpServer {
             None
         };
 
-        let install_hint = if prefill == ExecutablePathPrefill::Unavailable {
-            Some("executable path auto-detection unavailable; run `agent-browser-server --command install` to install a browser through this binary")
-        } else {
-            None
-        };
+        let filtered_files = prepare_sandbox_files(
+            Path::new("."),
+            input.sandbox_ignore.as_deref().map(Path::new),
+            &execution.files,
+        )
+        .map_err(|error| {
+            McpError::invalid_params(error.to_string(), Option::<serde_json::Value>::None)
+        })?;
 
         let result = serde_json::json!({
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code,
-            "hint": install_hint,
-            "page_agent_injection": page_agent_injection
+            "page_agent_injection": page_agent_injection,
+            "resources_created": filtered_files.len()
         });
-
-        let mut content = vec![Content::text(
+        let mut contents = vec![Content::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )];
 
-        if exit_code == 0 {
-            if let Some(resource) = self
-                .maybe_capture_command_output_resource(&arguments, &stdout)
-                .await
-            {
-                content.push(Content::resource_link(resource));
-            }
+        for prepared_file in filtered_files {
+            let resource_name = prepared_file
+                .relative_path
+                .to_string_lossy()
+                .replace('\\', "/");
+            let resource = self
+                .create_resource_with_size(
+                    "file",
+                    resource_name,
+                    prepared_file.file.path.display().to_string(),
+                    prepared_file.file.mime_type.clone(),
+                    prepared_file.file.data.clone(),
+                )
+                .await;
+            contents.push(Content::resource_link(resource));
         }
 
-        Ok(CallToolResult::success(content))
+        Ok(CallToolResult::success(contents))
     }
 
     #[tool(
@@ -637,8 +398,8 @@ impl ServerHandler for SystemMcpServer {
                             .with_mime_type(entry.mime_type.clone())
                             .with_size(entry.data.len().min(u32::MAX as usize) as u32)
                             .with_description(format!(
-                                "generated-at-ms:{}",
-                                entry.created_at_unix_ms
+                                "source-path:{} generated-at-ms:{}",
+                                entry.source_path, entry.created_at_unix_ms
                             )),
                         None,
                     )
@@ -671,7 +432,7 @@ impl ServerHandler for SystemMcpServer {
     }
 }
 
-pub async fn run_mcp_sse<F>(
+pub async fn run_mcp_streamable_http<F>(
     config: AppConfig,
     page_agent_config: PageAgentConfig,
     shutdown: F,
@@ -680,14 +441,12 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
-    let detected_browser_path = crate::browser_detection::find_chrome_browser();
     let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
-    let sse_service: StreamableHttpService<SystemMcpServer, LocalSessionManager> =
+    let streamable_http_service: StreamableHttpService<SystemMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
                 Ok(SystemMcpServer::new(
                     binary_path.clone(),
-                    detected_browser_path.clone(),
                     page_agent_config.clone(),
                     resource_store.clone(),
                 ))
@@ -698,7 +457,10 @@ where
 
     let app = Router::new()
         .route("/", get(dashboard_handler))
-        .nest_service("/mcp", sse_service)
+        .route("/skills", get(skills_index_handler))
+        .route("/skills/", get(skills_index_handler))
+        .route("/skills/{*path}", get(skills_file_handler))
+        .nest_service("/mcp", streamable_http_service)
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -728,19 +490,165 @@ async fn dashboard_handler() -> Html<&'static str> {
     Html(ADMIN_DASHBOARD_HTML)
 }
 
+async fn skills_index_handler() -> Html<String> {
+    Html(render_skills_index_html())
+}
+
+fn skills_asset(path: &str) -> Option<(&'static str, &'static str)> {
+    SKILLS_ASSETS
+        .iter()
+        .find(|(candidate, _, _)| *candidate == path)
+        .map(|(_, mime, body)| (*mime, *body))
+}
+
+fn render_skills_index_html() -> String {
+    let mut items = String::new();
+    for (path, _, _) in SKILLS_ASSETS {
+        items.push_str("<li><a href=\"/skills/");
+        items.push_str(path);
+        items.push_str("\">");
+        items.push_str(path);
+        items.push_str("</a></li>");
+    }
+
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"UTF-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" /><title>agent-browser-server skills</title><style>body{{font-family:sans-serif;margin:24px;max-width:760px;}}h1{{margin-bottom:8px;}}ul{{line-height:1.6;}}</style></head><body><h1>Skills</h1><ul>{items}</ul></body></html>"
+    )
+}
+
+async fn skills_file_handler(AxumPath(path): AxumPath<String>) -> Response {
+    match skills_asset(path.trim_start_matches('/')) {
+        Some((mime, body)) => ([(header::CONTENT_TYPE, mime)], body).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn command_preserves_paths_and_applies_ignore_filter() {
+        let binary_path = resolve_binary_path(None).expect("resolve binary path");
+        let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
+        let server = SystemMcpServer::new(
+            binary_path,
+            PageAgentConfig::default(),
+            resource_store.clone(),
+        );
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let output_dir = std::env::temp_dir().join(format!("abs-mcp-command-ignore-{unique}"));
+        std::fs::create_dir_all(&output_dir).expect("create output dir");
+
+        let keep_path = std::env::temp_dir().join(format!("abs-mcp-keep-{unique}.txt"));
+        let noisy_path = std::env::temp_dir().join(format!("abs-mcp-trace-{unique}.log"));
+        let ignore_path = output_dir.join("sandbox.ignore");
+        std::fs::write(&ignore_path, "*.log\n").expect("write ignore file");
+
+        let command = format!(
+            "echo keep > {} && echo noisy > {}",
+            keep_path.display(),
+            noisy_path.display()
+        );
+
+        let result = server
+            .command(Parameters(CommandInput {
+                command,
+                env: None,
+                sandbox_ignore: Some(ignore_path.display().to_string()),
+            }))
+            .await
+            .expect("command tool should succeed");
+
+        assert_eq!(result.content.len(), 2);
+
+        let serialized = serde_json::to_string(&result).expect("serialize tool result");
+        assert!(
+            serialized.contains("resources_created"),
+            "result={serialized}"
+        );
+        assert!(serialized.contains("abs-mcp-keep-"), "result={serialized}");
+        assert!(!serialized.contains("trace.log"), "result={serialized}");
+
+        let store = resource_store.read().await;
+        assert_eq!(store.len(), 1);
+
+        let (uri, entry) = store.iter().next().expect("resource entry");
+        assert!(uri.starts_with("resource://file/"), "uri={uri}");
+        assert_eq!(entry.name, format!("tmp/abs-mcp-keep-{unique}.txt"));
+        assert_eq!(entry.source_path, keep_path.display().to_string());
+        assert_eq!(entry.mime_type, "text/plain");
+
+        drop(store);
+        let _ = std::fs::remove_file(&keep_path);
+        let _ = std::fs::remove_file(&noisy_path);
+        let _ = std::fs::remove_dir_all(output_dir);
+    }
+
+    #[tokio::test]
+    async fn command_supports_basic_shell_commands() {
+        let binary_path = resolve_binary_path(None).expect("resolve binary path");
+        let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
+        let server = SystemMcpServer::new(
+            binary_path,
+            PageAgentConfig::default(),
+            resource_store.clone(),
+        );
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let shell_path = std::env::temp_dir().join(format!("abs-mcp-shell-{unique}.txt"));
+        let command = format!(
+            "name=world && echo hello-$name | cat && echo saved-$name > {} && cat {}",
+            shell_path.display(),
+            shell_path.display()
+        );
+
+        let result = server
+            .command(Parameters(CommandInput {
+                command,
+                env: None,
+                sandbox_ignore: None,
+            }))
+            .await
+            .expect("command tool should succeed");
+
+        assert_eq!(result.content.len(), 2);
+        let value = serde_json::to_value(&result).expect("serialize tool result value");
+        let text = value
+            .pointer("/content/0/text")
+            .and_then(|value| value.as_str())
+            .expect("first content text");
+        assert!(
+            text.contains("\"stdout\": \"hello-world\\nsaved-world\\n\""),
+            "text={text}"
+        );
+
+        let store = resource_store.read().await;
+        assert_eq!(store.len(), 1);
+
+        let (_, entry) = store.iter().next().expect("resource entry");
+        assert_eq!(entry.name, format!("tmp/abs-mcp-shell-{unique}.txt"));
+        assert_eq!(entry.source_path, shell_path.display().to_string());
+
+        drop(store);
+        let _ = std::fs::remove_file(&shell_path);
+    }
+}
+
 pub async fn run_mcp_stdio(
     config: AppConfig,
     page_agent_config: PageAgentConfig,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
-    let detected_browser_path = crate::browser_detection::find_chrome_browser();
     let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
-    let server = SystemMcpServer::new(
-        binary_path,
-        detected_browser_path,
-        page_agent_config,
-        resource_store,
-    );
+    let server = SystemMcpServer::new(binary_path, page_agent_config, resource_store);
 
     let transport = stdio();
     let service = server

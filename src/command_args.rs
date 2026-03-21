@@ -1,12 +1,16 @@
-use std::path::Path;
+use ftmi::extract_paths_from_text;
+use std::collections::HashSet;
+use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutablePathPrefill {
-    AlreadyProvided,
-    Injected,
-    Unavailable,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedCommand {
+    pub script: String,
+    pub should_inject_page_agent: bool,
+    pub agentic_prompt: Option<String>,
+    pub referenced_paths: HashSet<PathBuf>,
 }
 
+#[cfg(test)]
 pub fn build_args(
     command: &Option<String>,
     args: &Option<Vec<String>>,
@@ -28,35 +32,12 @@ pub fn build_args(
     Err("provide non-empty args or command".to_string())
 }
 
-pub fn ensure_executable_path_arg(
-    args: &mut Vec<String>,
-    detected_browser_path: Option<&Path>,
-) -> ExecutablePathPrefill {
-    if args
-        .iter()
-        .any(|arg| arg == "--executable-path" || arg.starts_with("--executable-path="))
-    {
-        return ExecutablePathPrefill::AlreadyProvided;
-    }
-
-    if let Some(path) = detected_browser_path {
-        let executable_path_arg = format!("--executable-path={}", path.to_string_lossy());
-        let insert_index = args
-            .iter()
-            .position(|arg| !arg.starts_with('-'))
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        args.insert(insert_index, executable_path_arg);
-        return ExecutablePathPrefill::Injected;
-    }
-
-    ExecutablePathPrefill::Unavailable
-}
-
+#[cfg(test)]
 pub fn has_passthrough_command(args: &[String]) -> bool {
     !args.is_empty()
 }
 
+#[cfg(test)]
 pub fn translate_agentic_open(args: &mut [String]) -> Result<bool, String> {
     if let Some(index) = args.iter().position(|arg| arg == "agentic-open") {
         if args.get(index + 1).is_some() {
@@ -69,6 +50,7 @@ pub fn translate_agentic_open(args: &mut [String]) -> Result<bool, String> {
     Ok(false)
 }
 
+#[cfg(test)]
 pub fn translate_agentic_prompt(args: &mut Vec<String>) -> Result<Option<String>, String> {
     if let Some(index) = args.iter().position(|arg| arg == "agentic-prompt") {
         let Some(first_arg) = args.get(index + 1).cloned() else {
@@ -94,6 +76,65 @@ pub fn translate_agentic_prompt(args: &mut Vec<String>) -> Result<Option<String>
     }
 
     Ok(None)
+}
+
+pub fn preprocess_agentic_script(script: &str) -> Result<(String, bool, Option<String>), String> {
+    if script.trim().is_empty() {
+        return Err("command cannot be empty".to_string());
+    }
+
+    let has_open = script.contains("agentic-open");
+    let has_prompt = script.contains("agentic-prompt");
+    let should_inject = has_open || has_prompt;
+
+    let prompt = if has_prompt {
+        if let Some(tokens) = shlex::split(script) {
+            if let Some(index) = tokens.iter().position(|token| token == "agentic-prompt") {
+                let Some(first_arg) = tokens.get(index + 1).cloned() else {
+                    return Err("usage: agent-browser agentic-prompt [<url>] <prompt>".to_string());
+                };
+
+                let first_looks_like_url =
+                    first_arg.contains("://") || first_arg.starts_with("about:");
+
+                if first_looks_like_url {
+                    let Some(prompt) = tokens.get(index + 2).cloned() else {
+                        return Err("usage: agent-browser agentic-prompt <url> <prompt>\n  prompt is required when a URL is provided".to_string());
+                    };
+                    Some(prompt)
+                } else {
+                    Some(first_arg)
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let rewritten = script
+        .replace("agentic-open", "open")
+        .replace("agentic-prompt", "open");
+
+    Ok((rewritten, should_inject, prompt))
+}
+
+pub fn prepare_command(script: &str) -> Result<PreparedCommand, String> {
+    let (script, should_inject_page_agent, agentic_prompt) = preprocess_agentic_script(script)?;
+    let referenced_paths = extract_paths_from_text(&script)
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+    Ok(PreparedCommand {
+        script,
+        should_inject_page_agent,
+        agentic_prompt,
+        referenced_paths,
+    })
 }
 
 #[cfg(test)]
@@ -136,32 +177,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_executable_path_arg_appends_when_missing() {
-        let mut args = vec!["open".to_string(), "https://example.com".to_string()];
-        let detected = PathBuf::from("/detected/chrome");
-
-        let result = ensure_executable_path_arg(&mut args, Some(detected.as_path()));
-
-        assert_eq!(result, ExecutablePathPrefill::Injected);
-        assert!(args
-            .iter()
-            .any(|arg| arg == "--executable-path=/detected/chrome"));
-    }
-
-    #[test]
-    fn ensure_executable_path_arg_inserts_after_subcommand() {
-        let mut args = vec!["screenshot".to_string(), "--full".to_string()];
-        let detected = PathBuf::from("/detected/chrome");
-
-        let result = ensure_executable_path_arg(&mut args, Some(detected.as_path()));
-
-        assert_eq!(result, ExecutablePathPrefill::Injected);
-        assert_eq!(args[0], "screenshot");
-        assert_eq!(args[1], "--executable-path=/detected/chrome");
-        assert_eq!(args[2], "--full");
-    }
-
-    #[test]
     fn has_passthrough_command_true_for_flag_only_args() {
         let args = vec!["--version".to_string()];
         assert!(has_passthrough_command(&args));
@@ -177,54 +192,6 @@ mod tests {
     fn has_passthrough_command_true_for_positional_args() {
         let args = vec!["open".to_string(), "https://example.com".to_string()];
         assert!(has_passthrough_command(&args));
-    }
-
-    #[test]
-    fn ensure_executable_path_arg_does_not_override_equals_form() {
-        let mut args = vec![
-            "open".to_string(),
-            "--executable-path=/custom/browser".to_string(),
-        ];
-
-        let result = ensure_executable_path_arg(&mut args, Some(Path::new("/detected/chrome")));
-
-        assert_eq!(result, ExecutablePathPrefill::AlreadyProvided);
-        let count = args
-            .iter()
-            .filter(|arg| arg.starts_with("--executable-path"))
-            .count();
-        assert_eq!(count, 1);
-        assert!(args
-            .iter()
-            .any(|arg| arg == "--executable-path=/custom/browser"));
-    }
-
-    #[test]
-    fn ensure_executable_path_arg_does_not_override_split_form() {
-        let mut args = vec![
-            "open".to_string(),
-            "--executable-path".to_string(),
-            "/custom/browser".to_string(),
-        ];
-
-        let result = ensure_executable_path_arg(&mut args, Some(Path::new("/detected/chrome")));
-
-        assert_eq!(result, ExecutablePathPrefill::AlreadyProvided);
-        let count = args
-            .iter()
-            .filter(|arg| arg.starts_with("--executable-path"))
-            .count();
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn ensure_executable_path_arg_noop_without_detected_path() {
-        let mut args = vec!["open".to_string()];
-
-        let result = ensure_executable_path_arg(&mut args, None);
-
-        assert_eq!(result, ExecutablePathPrefill::Unavailable);
-        assert_eq!(args, vec!["open"]);
     }
 
     #[test]
@@ -306,5 +273,65 @@ mod tests {
         let mut unrelated = vec!["open".to_string(), "https://example.com".to_string()];
         assert_eq!(translate_agentic_prompt(&mut unrelated).unwrap(), None);
         assert_eq!(unrelated, vec!["open", "https://example.com"]);
+    }
+
+    #[test]
+    fn preprocess_agentic_script_allows_shell_operators_with_synthetic_commands() {
+        let result =
+            preprocess_agentic_script("agent-browser agentic-open https://example.com | cat")
+                .unwrap();
+        assert_eq!(result.0, "agent-browser open https://example.com | cat");
+        assert!(result.1);
+        assert!(result.2.is_none());
+
+        let result = preprocess_agentic_script(
+            "agent-browser agentic-prompt https://example.com 'hello' && echo done",
+        )
+        .unwrap();
+        assert_eq!(
+            result.0,
+            "agent-browser open https://example.com 'hello' && echo done"
+        );
+        assert!(result.1);
+        assert_eq!(result.2, Some("hello".to_string()));
+    }
+
+    #[test]
+    fn preprocess_agentic_script_passes_non_agentic_compound_shell() {
+        let result = preprocess_agentic_script("echo hello | cat").unwrap();
+        assert_eq!(result.0, "echo hello | cat");
+        assert!(!result.1);
+        assert!(result.2.is_none());
+    }
+
+    #[test]
+    fn preprocess_agentic_script_rewrites_without_prefix_too() {
+        let result = preprocess_agentic_script("agentic-open https://example.com").unwrap();
+        assert_eq!(result.0, "open https://example.com");
+        assert!(result.1);
+        assert!(result.2.is_none());
+
+        let result =
+            preprocess_agentic_script("agentic-prompt https://example.com 'hello'").unwrap();
+        assert_eq!(result.0, "open https://example.com 'hello'");
+        assert!(result.1);
+        assert_eq!(result.2, Some("hello".to_string()));
+    }
+
+    #[test]
+    fn prepare_command_extracts_paths_from_rewritten_script() {
+        let prepared =
+            prepare_command("agent-browser agentic-open https://example.com > /tmp/report.json")
+                .unwrap();
+
+        assert_eq!(
+            prepared.script,
+            "agent-browser open https://example.com > /tmp/report.json"
+        );
+        assert!(prepared.should_inject_page_agent);
+        assert!(prepared.agentic_prompt.is_none());
+        assert!(prepared
+            .referenced_paths
+            .contains(&PathBuf::from("/tmp/report.json")));
     }
 }

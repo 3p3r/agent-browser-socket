@@ -4,9 +4,14 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const VERSION: &str = "v0.21.4";
+const SKILLS_REPO_TREE_URL: &str =
+    "https://api.github.com/repos/vercel-labs/agent-browser/git/trees/main?recursive=1";
+const SKILLS_BASE_RAW_URL: &str =
+    "https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser";
+const SKILLS_PREFIX: &str = "skills/agent-browser/";
 
 fn main() {
     if let Err(error) = run() {
@@ -24,6 +29,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     prepare_sanitized_page_agent_bundle(&page_agent_source, &out_dir)?;
+    prepare_upstream_skills(&out_dir)?;
 
     let target_os = env::var("CARGO_CFG_TARGET_OS")?;
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH")?;
@@ -44,6 +50,280 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn prepare_upstream_skills(out_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let skills_root = out_dir.join("skills");
+    fs::create_dir_all(&skills_root)?;
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("agent-browser-server-build")
+        .build()?;
+    let mut discovered_files = discover_upstream_skill_files(&client)?;
+
+    for relative_path in &discovered_files {
+        let source = fetch_upstream_skill_file(&client, relative_path)?;
+        let processed = process_upstream_skill_file(relative_path, source);
+        let destination = skills_root.join(relative_path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(destination, processed)?;
+    }
+
+    fs::write(
+        skills_root.join("references/agentic-commands.md"),
+        render_agentic_commands_reference(),
+    )?;
+    discovered_files.push("references/agentic-commands.md".to_string());
+
+    discovered_files.sort();
+    discovered_files.dedup();
+    fs::write(
+        out_dir.join("skills_manifest.rs"),
+        render_skills_manifest_rs(&discovered_files),
+    )?;
+
+    Ok(())
+}
+
+fn discover_upstream_skill_files(
+    client: &reqwest::blocking::Client,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let response = client
+        .get(SKILLS_REPO_TREE_URL)
+        .send()?
+        .error_for_status()?;
+    let response_text = response.text()?;
+    let json: serde_json::Value = serde_json::from_str(&response_text)?;
+    let entries = json
+        .get("tree")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "missing tree array in GitHub API response".to_string())?;
+
+    let mut files = Vec::new();
+    for entry in entries {
+        let Some(kind) = entry.get("type").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if kind != "blob" {
+            continue;
+        }
+
+        let Some(path) = entry.get("path").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(relative) = path.strip_prefix(SKILLS_PREFIX) else {
+            continue;
+        };
+
+        if relative.ends_with(".md") || relative.ends_with(".sh") {
+            files.push(relative.to_string());
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+fn fetch_upstream_skill_file(
+    client: &reqwest::blocking::Client,
+    relative_path: &str,
+) -> Result<String, Box<dyn Error>> {
+    let url = format!("{SKILLS_BASE_RAW_URL}/{relative_path}");
+    let response = client.get(url).send()?.error_for_status()?;
+    Ok(response.text()?)
+}
+
+fn process_upstream_skill_file(relative_path: &str, source: String) -> String {
+    match relative_path {
+        "SKILL.md" => process_skill_md(source),
+        "references/commands.md" => {
+            let source = format!(
+                "{source}\n\n## Synthetic Agentic Commands\n\nSee [agentic-commands.md](references/agentic-commands.md) for `agentic-open` and `agentic-prompt` in this server."
+            );
+            rewrite_markdown_for_runtime(&source, relative_path)
+        }
+        path if path.ends_with(".md") => rewrite_markdown_for_runtime(&source, relative_path),
+        path if path.ends_with(".sh") => source,
+        _ => source,
+    }
+}
+
+fn process_skill_md(source: String) -> String {
+    let mut processed = source;
+    processed = processed.replace(
+        "allowed-tools: Bash(npx agent-browser:*), Bash(agent-browser:*)",
+        "allowed-tools: mcp__agent_browser__command",
+    );
+    processed = processed.replace(
+        "The CLI uses Chrome/Chromium via CDP directly. Install via `npm i -g agent-browser`, `brew install agent-browser`, or `cargo install agent-browser`. Run `agent-browser install` to download Chrome. Run `agent-browser upgrade` to update to the latest version.",
+        "Use this skill through the MCP `command` tool in this server. Commands execute in a bash context where `agent-browser` is available. Execute scripts with full bash semantics (pipes, redirections, stdin): `echo \"pass\" | agent-browser auth save github --url https://github.com/login --username user --password-stdin`.",
+    );
+
+    if !processed.contains("references/agentic-commands.md") {
+        let injection = "| [references/agentic-commands.md](references/agentic-commands.md)       | Synthetic `agentic-open` and `agentic-prompt` behavior in this server |";
+        processed = if let Some(index) = processed.find("## Ready-to-Use Templates") {
+            format!(
+                "{}\n{}\n{}",
+                &processed[..index],
+                injection,
+                &processed[index..]
+            )
+        } else {
+            format!("{processed}\n\n## Synthetic Agentic Commands\n\nSee [references/agentic-commands.md](references/agentic-commands.md).")
+        };
+    }
+
+    rewrite_markdown_for_runtime(&processed, "SKILL.md")
+}
+
+fn rewrite_markdown_for_runtime(source: &str, current_relative_path: &str) -> String {
+    let mut out = source.to_string();
+
+    let mut cursor = 0;
+    while let Some(open) = out[cursor..].find("](") {
+        let start = cursor + open + 2;
+        let Some(close_rel) = out[start..].find(')') else {
+            break;
+        };
+        let end = start + close_rel;
+        let target = out[start..end].to_string();
+
+        if should_rewrite_link_target(&target) {
+            if let Some(rewritten) = resolve_runtime_link(current_relative_path, &target) {
+                out.replace_range(start..end, &rewritten);
+                cursor = start + rewritten.len() + 1;
+                continue;
+            }
+        }
+
+        cursor = end + 1;
+    }
+
+    out
+}
+
+fn should_rewrite_link_target(target: &str) -> bool {
+    !(target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("mailto:")
+        || target.starts_with('#'))
+}
+
+fn resolve_runtime_link(current_relative_path: &str, target: &str) -> Option<String> {
+    let (path_part, suffix) = split_link_suffix(target);
+    let resolved = normalize_path(current_relative_path, path_part)?;
+    if !(resolved.ends_with(".md") || resolved.ends_with(".sh")) {
+        return None;
+    }
+    Some(format!("/skills/{resolved}{suffix}"))
+}
+
+fn split_link_suffix(target: &str) -> (&str, &str) {
+    let hash_index = target.find('#');
+    let query_index = target.find('?');
+    let split_index = match (query_index, hash_index) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+
+    if let Some(index) = split_index {
+        (&target[..index], &target[index..])
+    } else {
+        (target, "")
+    }
+}
+
+fn normalize_path(current_relative_path: &str, target: &str) -> Option<String> {
+    let mut segments: Vec<&str> = Vec::new();
+
+    if !target.starts_with('/') {
+        let parent = Path::new(current_relative_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        for component in parent.components() {
+            if let std::path::Component::Normal(part) = component {
+                segments.push(part.to_str()?);
+            }
+        }
+    }
+
+    let normalized_target = target.trim_start_matches('/');
+    for part in normalized_target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            value => segments.push(value),
+        }
+    }
+
+    if segments.is_empty() {
+        return None;
+    }
+
+    Some(segments.join("/"))
+}
+
+fn render_skills_manifest_rs(files: &[String]) -> String {
+    let mut out = String::new();
+    out.push_str("pub(crate) const SKILLS_ASSETS: &[(&str, &str, &str)] = &[\n");
+
+    for relative_path in files {
+        let mime = mime_for_path(relative_path);
+        let path_literal = serde_json::to_string(relative_path).unwrap_or_else(|_| "\"\"".into());
+        let mime_literal = serde_json::to_string(mime).unwrap_or_else(|_| "\"\"".into());
+        out.push_str("    (");
+        out.push_str(&path_literal);
+        out.push_str(", ");
+        out.push_str(&mime_literal);
+        out.push_str(", include_str!(concat!(env!(\"OUT_DIR\"), \"/skills/");
+        out.push_str(relative_path);
+        out.push_str("\"))),\n");
+    }
+
+    out.push_str("];\n");
+    out
+}
+
+fn mime_for_path(path: &str) -> &'static str {
+    if path.ends_with(".md") {
+        "text/markdown; charset=utf-8"
+    } else if path.ends_with(".sh") {
+        "text/x-shellscript; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+fn render_agentic_commands_reference() -> &'static str {
+    r#"# Synthetic Agentic Commands
+
+This server supports two synthetic commands in the MCP `command` tool.
+
+## `agentic-open`
+
+- Usage: `agentic-open <url>`
+- Translation: rewritten to `open <url>`
+- Behavior: after open succeeds, page-agent is injected so follow-up prompts can run in-page.
+
+## `agentic-prompt`
+
+- Usage: `agentic-prompt [<url>] <prompt>`
+- Form A: `agentic-prompt <url> <prompt>` rewrites to `open <url>` and runs the prompt after injection.
+- Form B: `agentic-prompt <prompt>` keeps the current page and runs the prompt after injection.
+
+## Notes
+
+- URL detection follows command parsing rules used by this server (`://` or `about:` prefix).
+- If URL form is used without a prompt, command validation fails.
+- These behaviors are implemented by command translation before browser execution.
+"#
 }
 
 fn prepare_sanitized_page_agent_bundle(

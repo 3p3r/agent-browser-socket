@@ -7,7 +7,7 @@
  *
  * Validates:
  *   1. <binary> --version                       exits 0, stdout contains "agent-browser-server"
- *   2. <binary> --verbose --command --version   forwards to embedded binary
+ *   2. <binary> --verbose --command agent-browser --version   forwards to embedded binary
  */
 
 import { execFile } from "node:child_process";
@@ -70,8 +70,8 @@ await test("--version prints wrapper version", ["--version"], ({ code, stdout })
 });
 
 await test(
-  "--verbose --command --version forwards to embedded binary",
-  ["--verbose", "--command", "--version"],
+  "--verbose --command agent-browser --version forwards to embedded binary",
+  ["--verbose", "--command", "agent-browser", "--version"],
   ({ code, stdout }) => {
     assert(code === 0, `expected exit code 0, got ${code}`);
     assert(stdout.includes("agent-browser"), `stdout should contain "agent-browser", got: ${stdout.trim()}`);
