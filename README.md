@@ -1,37 +1,25 @@
 # Oatmeal
 
-Oatmeal is an opinionated set of MCP tools that ship in a single binary and provide an isolated and consistent virtual Bash environment for web-agents and in-browser automation workflows.
+Oatmeal is a single binary that gives you an MCP server, a browser automation command surface, and a shell-style command mode for scripted workflows.
 
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
-- [CLI Commands](#cli-commands)
-  - [Sandbox File Output](#sandbox-file-output)
-- [Advanced Features](#advanced-features)
-  - [Browser Detection on Startup](#browser-detection-on-startup)
-  - [URI Launch Mode](#uri-launch-mode)
-  - [Page Agent Runtime Flags](#page-agent-runtime-flags)
-  - [MCP Tools](#mcp-tools)
-  - [Synthetic Commands](#synthetic-commands)
+- [Running Oatmeal](#running-oatmeal)
+- [Command Mode](#command-mode)
+  - [Exporting Files from Command Mode](#exporting-files-from-command-mode)
+- [MCP Tools](#mcp-tools)
+- [URI Launch Mode](#uri-launch-mode)
 - [Platform Notes](#platform-notes)
-
-
-Oatmeal is an integration of the following components in one convenient MCP server:
-
-- `bashkit`: Virtual and cross platform Bash environment with file system isolation and auto-syncing of created files back to the real filesystem.
-- `agent-browser`: Exposed as a shell builtin to Bashkit, allowing you to run `agent-browser` commands with full shell features like variables, pipes, redirection, and command chaining.
-- `page-agent`: Injected on-demand into any page opened through `agent-browser` with `agentic-open`, enabling powerful agentic interactions with web content.
-- `oatmeal://` URI handler to auto-start Oatmeal right from links in your browser and web pages.
-
----
 
 ## Quick Start
 
-**1. Download** from [releases](https://github.com/3p3r/oatmeal/releases):
+Download the latest binary from [releases](https://github.com/3p3r/oatmeal/releases):
+
 - Linux: `oatmeal-linux`
-- macOS: `oatmeal-mac`  
+- macOS: `oatmeal-mac`
 - Windows: `oatmeal-windows.exe`
 
-**2. Run:**
+Run it:
 
 ```bash
 # Linux/macOS
@@ -42,28 +30,42 @@ chmod +x ./oatmeal-*
 .\oatmeal-windows.exe
 ```
 
-> **Mac users**: xattr -d com.apple.quarantine ./oatmeal-mac to run the binary after downloading from the Internet.
+By default, Oatmeal starts an MCP server on `http://localhost:9607/mcp`.
 
-> **Windows users**: You may need to allow the app through Windows Defender or SmartScreen, look for "Run Anyway".
+macOS note:
 
-**3. Connect** to the MCP server at `http://localhost:9607/mcp` via Streamable HTTP.
+```bash
+xattr -d com.apple.quarantine ./oatmeal-mac
+```
 
----
+Windows note:
+
+You may need to allow the binary through SmartScreen or Windows Defender the first time you run it.
 
 ## Configuration
 
-**Defaults** (no config needed):
-- Port: `9607`
-- Host: `0.0.0.0`
-- Browser: auto-detected
+Oatmeal works without configuration. Default behavior:
 
-**Custom config** (optional) via `.oatmeal` file or `OATMEAL_*` env vars:
+- Host: `0.0.0.0`
+- Port: `9607`
+- Browser path: auto-detected
+- Page-agent model: `qwen3.5-plus`
+- Page-agent URL: `http://localhost:11434/v1`
+- Page-agent key: `NA`
+
+Optional config sources:
+
+- `~/.oatmeal`
+- `./.oatmeal`
+- `OATMEAL_*` environment variables
+- CLI flags
+
+Example config:
 
 ```toml
-# .oatmeal or ~/.oatmeal
 port = 9607
 host = "0.0.0.0"
-browser_path = "/usr/local/bin/agent-browser"
+browser_path = "/path/to/browser"
 
 [page_agent]
 model = "qwen3.5-plus"
@@ -71,95 +73,142 @@ url = "http://localhost:11434/v1"
 key = "NA"
 ```
 
-For nested `page_agent` values via env vars, use:
+Nested page-agent environment variables use double underscores:
+
 - `OATMEAL_PAGE_AGENT__MODEL`
 - `OATMEAL_PAGE_AGENT__URL`
 - `OATMEAL_PAGE_AGENT__KEY`
 
-**Priority:** Built-in → `~/.oatmeal` → `./.oatmeal` → `OATMEAL_*` env vars → CLI flags
+Precedence is:
 
-CLI flags always override file and env var configuration.
+`built-in defaults -> ~/.oatmeal -> ./.oatmeal -> OATMEAL_* -> CLI flags`
 
----
+## Running Oatmeal
 
-## CLI Commands
+Oatmeal supports three main ways to run:
 
-The wrapper supports HTTP server mode by default, `--mcp stdio` for stdio transport, and `--command` for shell-style command execution.
+- HTTP MCP server mode, which is the default
+- stdio MCP mode with `--mcp stdio`
+- one-shot command execution with `--command`
 
-`--verbose` shows browser stdout/stderr (suppressed by default). Use `--headed` inside the forwarded `--command` script when you want a visible browser window.
+Examples:
 
 ```bash
-# Default MCP server over Streamable HTTP
+# Default MCP server over HTTP at /mcp
 ./oatmeal-*
 
-# Explicit MCP transport selection
+# Explicit transport selection
 ./oatmeal-* --mcp
 ./oatmeal-* --mcp sse
 ./oatmeal-* --mcp stdio
 
-# Full shell command execution with agent-browser available
-./oatmeal-* --command "agent-browser open https://example.com"
-./oatmeal-* --command "agent-browser --headed open https://example.com"
+# Print version or cache directory
+./oatmeal-* --version
+./oatmeal-* --cache-dir
+./oatmeal-* cache-dir
+
+# Capture all attached monitors
+./oatmeal-* --screenshot
+
+# Delete the cached embedded browser/runtime files
+./oatmeal-* --clean
 ```
 
-### Sandbox File Output
+Useful flags:
 
-Files created during command execution (both in the sandboxed shell and by `oatmeal` on the real filesystem) are automatically detected.
+- `--verbose`: print forwarded browser stdout and stderr
+- `--page-agent-model <name>`
+- `--page-agent-url <url>`
+- `--page-agent-key <token>`
 
-- **MCP mode**: Detected files are exposed as `resource://file/{id}` MCP resources alongside the command response.
-- **CLI mode**: Use `--sandbox-output <dir>` to sync detected files into a directory.
+`--command` implies verbose output automatically.
 
-When a command creates a new real filesystem file such as `/tmp/report.png`, the wrapper syncs it into `--sandbox-output` and removes the original temp file when possible. In-memory sandbox files are written directly to the output directory.
+## Command Mode
 
-Sync-back filtering uses built-in ignore rules for common junk such as VCS metadata, editor swap files, and OS noise. You can layer additional gitignore-style patterns from a real file on disk with `--sandbox-ignore <path>`.
+Use `--command` when you want to run a shell-style script instead of starting the MCP server.
+
+Inside command mode, both `agent-browser` and the shorter `ab` alias are available.
+
+Examples:
 
 ```bash
-./oatmeal-* --sandbox-output ./output --command "agent-browser snapshot -i > /tmp/screenshot.json"
+./oatmeal-* --command "agent-browser open https://example.com"
+./oatmeal-* --command "ab open https://example.com"
+./oatmeal-* --command "ab --headed open https://example.com"
+./oatmeal-* --command "name=world && echo hello-$name > /report.txt"
+```
 
-# Add custom ignore patterns on top of the built-in defaults
+Synthetic browser helpers are also supported:
+
+```bash
+./oatmeal-* --command "ab agentic-open https://example.com"
+./oatmeal-* --command "ab agentic-prompt https://example.com 'summarize this page'"
+./oatmeal-* --command "ab agentic-prompt 'find the primary CTA on the current page'"
+```
+
+### Exporting Files from Command Mode
+
+Oatmeal detects files created during command execution.
+
+- In CLI command mode, use `--sandbox-output <dir>` to export those files into a real directory.
+- Use `--sandbox-ignore <path>` to add extra gitignore-style exclude rules during export.
+
+Examples:
+
+```bash
+./oatmeal-* --sandbox-output ./output --command "ab snapshot -i > /tmp/snapshot.json"
 ./oatmeal-* --sandbox-output ./output --sandbox-ignore .sandbox-ignore --command "echo keep > /keep.txt && echo noise > /trace.log"
 ```
 
----
+For page PDFs, open the page first, then save the PDF:
 
-## Advanced Features
+```bash
+./oatmeal-* --command "ab open https://github.com && ab pdf ./cap.pdf"
+```
 
-### Browser Detection on Startup
+`ab pdf` saves the current page to the path you provide. It does not use the `pdf <url> <path>` form.
 
-On launch, Oatmeal tries to detect your local Chrome-like browser path. This saves you a download from the original `agent-browser`.
+## MCP Tools
 
-### URI Launch Mode
+When Oatmeal is running as an MCP server, it exposes these tools:
 
-Default server startup and `--mcp sse` automatically register the URI handler when needed. You can also register it explicitly with `--register-uri`, then open URLs:
+- `health`
+- `version`
+- `cache_directory`
+- `screenshot_system`
+- `shell_command`
+- `delete_resource`
+- `delete_all_resources`
+- `shutdown`
+
+User-facing behavior:
+
+- `shell_command` runs the same script surface as CLI `--command`
+- files generated by MCP command execution are returned as MCP resources
+- `cache_directory` returns the cache folder used by Oatmeal
+- `screenshot_system` captures all attached monitors as image resources
+- `delete_resource` and `delete_all_resources` clean up generated resources from the current server
+
+## URI Launch Mode
+
+Oatmeal supports an `oatmeal://` URI handler.
+
+You can register or remove it explicitly:
+
+```bash
+./oatmeal-* --register-uri
+./oatmeal-* --unregister-uri
+```
+
+When Oatmeal starts in default HTTP mode, it will register the URI handler automatically if needed.
+
+Example URIs:
+
 - `oatmeal://open?port=9911`
 - `oatmeal://open?port=9911&host=127.0.0.1`
 
-### Page Agent Runtime Flags
-
-Use these startup flags to configure Page Agent behavior:
-
-- `--page-agent-model` (default: `qwen3.5-plus`)
-- `--page-agent-url` (default: `http://localhost:11434/v1`)
-- `--page-agent-key` (default: `NA` - sent as Bearer token)
-
-### MCP Tools
-
-**Available tools:**
-
-`health`, `version`, `shutdown`, `screenshot_system`, `shell_command`, `delete_resource`, `delete_all_resources`
-
-### Synthetic Commands
-
-The following convenience commands are supported in command mode:
-
-- `agent-browser agentic-open <url>`
-- `agent-browser agentic-prompt <url> <prompt>`
-- `agent-browser agentic-prompt <prompt>`
-
----
-
 ## Platform Notes
 
-- Linux: Self-extracting, works on x86_64 and aarch64, glibc 2.35+
-- macOS: Universal binary (x86_64 + aarch64)
-- All binaries are 64-bit
+- Linux: x86_64 and aarch64
+- macOS: universal binary
+- Windows: 64-bit executable

@@ -1,10 +1,13 @@
-use crate::bashkit_executor::{BashkitExecutor, SandboxFile, SandboxFileOrigin};
-use crate::command_args::prepare_command;
+use crate::bashkit_executor::{SandboxFile, SandboxFileOrigin};
+use crate::command_runtime::{
+    execute_prepared_command, prepare_script_command, CommandExecutionMode,
+};
 use crate::configuration::{load_config, AppConfig, PageAgentConfig};
 use crate::embedded_binary::{clean_cached_binary, resolve_binary_path};
-use crate::page_agent_runtime::{run_page_agent_injection, run_page_agent_prompt};
+use crate::runtime_shared::{
+    capture_system_screenshots, oatmeal_cache_dir_text, oatmeal_version_text,
+};
 use crate::sandbox_files::prepare_sandbox_files;
-use crate::screenshot::capture_all_screenshots;
 use crate::server::{unregister_uri_scheme, URI_SCHEME};
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
@@ -18,7 +21,7 @@ use crossterm::terminal::{
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use std::error::Error;
 use std::ffi::OsString;
 use std::future::Future;
@@ -58,6 +61,8 @@ struct CliArgs {
     version: bool,
     #[arg(long, action = ArgAction::SetTrue, help = "Delete the cached embedded browser binary")]
     clean: bool,
+    #[arg(long, action = ArgAction::SetTrue, help = "Print the cache directory used by oatmeal")]
+    cache_dir: bool,
     #[arg(long, action = ArgAction::SetTrue, help = "Capture screenshots from all system monitors")]
     screenshot: bool,
     #[arg(long, action = ArgAction::SetTrue, help = "Print forwarded browser stdout and stderr")]
@@ -107,6 +112,7 @@ pub enum CliMode {
     UnregisterUri,
     Version,
     Clean,
+    CacheDir,
     Screenshot,
     Mcp(McpProtocol),
     Command(Vec<String>),
@@ -161,6 +167,8 @@ pub fn parse_cli(args: &[OsString]) -> ParsedCli {
                 CliMode::UnregisterUri
             } else if p.clean {
                 CliMode::Clean
+            } else if p.cache_dir {
+                CliMode::CacheDir
             } else if p.screenshot {
                 CliMode::Screenshot
             } else if p.version
@@ -170,6 +178,16 @@ pub fn parse_cli(args: &[OsString]) -> ParsedCli {
                     .unwrap_or(false)
             {
                 CliMode::Version
+            } else if p
+                .input
+                .as_ref()
+                .map(|value| {
+                    let value = value.to_string_lossy();
+                    value == "cache-dir" || value == "cache_dir"
+                })
+                .unwrap_or(false)
+            {
+                CliMode::CacheDir
             } else if let Some(ref input) = p.input {
                 let candidate = input.to_string_lossy();
                 if candidate.contains("://") {
@@ -449,11 +467,21 @@ fn run_idle_animation_loop(
                     dashboard_line,
                     Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
                 )));
+                status_lines.push(Line::from(Span::styled(
+                    format!("dashboard: http://{dashboard_host}:{port}/"),
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                )));
+                status_lines.push(Line::from(Span::styled(
+                    format!("cache folder: {}", oatmeal_cache_dir_text()),
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                )));
 
                 let paragraph = Paragraph::new(status_lines)
                     .block(Block::default().borders(Borders::ALL).title(title.clone()))
-                    .alignment(Alignment::Center);
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true });
 
+                frame.render_widget(Clear, card);
                 frame.render_widget(paragraph, card);
 
                 let wave_area = Rect {
@@ -577,7 +605,7 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             Ok(exit_code)
         }
         CliMode::Version => {
-            println!("oatmeal {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", oatmeal_version_text());
             Ok(0)
         }
         CliMode::Clean => {
@@ -589,8 +617,12 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
 
             Ok(0)
         }
+        CliMode::CacheDir => {
+            println!("{}", oatmeal_cache_dir_text());
+            Ok(0)
+        }
         CliMode::Screenshot => {
-            let screenshots = capture_all_screenshots()?;
+            let screenshots = capture_system_screenshots().map_err(std::io::Error::other)?;
             println!("{}", serde_json::to_string(&screenshots)?);
             Ok(0)
         }
@@ -675,17 +707,23 @@ pub async fn run_command_passthrough(
         shlex::try_join(forwarded_args.iter().map(|part| part.as_str()))
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?
     };
-    let prepared = prepare_command(&original_script)
+    let prepared = prepare_script_command(&original_script)
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
 
-    let executor = BashkitExecutor::new(binary_path.to_path_buf());
-    let execution = executor.execute(&prepared, None).await;
-    let stdout = execution.stdout;
-    let stderr = execution.stderr;
-    let exit_code = execution.exit_code;
+    let result = execute_prepared_command(
+        binary_path,
+        page_agent_config,
+        prepared,
+        None,
+        CommandExecutionMode::Cli,
+    )
+    .await;
+    let stdout = result.execution.stdout;
+    let stderr = result.execution.stderr;
+    let exit_code = result.execution.exit_code;
 
     if let Some(output_dir) = sandbox_output {
-        export_sandbox_files(output_dir, sandbox_ignore, &execution.files, verbose)?;
+        export_sandbox_files(output_dir, sandbox_ignore, &result.execution.files, verbose)?;
     }
 
     if verbose {
@@ -697,27 +735,34 @@ pub async fn run_command_passthrough(
         }
     }
 
-    if prepared.should_inject_page_agent && exit_code == 0 {
-        let injection_exit = run_page_agent_injection(binary_path, page_agent_config, None)
-            .await
-            .map_err(std::io::Error::other)?;
-        if injection_exit != 0 {
+    if let Some(injection) = result.page_agent_injection {
+        if injection.exit_code != 0 {
             if verbose {
-                eprintln!("page-agent injection failed with exit code {injection_exit}");
+                if !injection.stderr.is_empty() {
+                    eprintln!("{}", injection.stderr);
+                } else {
+                    eprintln!(
+                        "page-agent injection failed with exit code {}",
+                        injection.exit_code
+                    );
+                }
             }
-            return Ok(injection_exit);
+            return Ok(injection.exit_code);
         }
 
-        if let Some(prompt) = prepared.agentic_prompt.as_ref() {
-            let prompt_exit = run_page_agent_prompt(binary_path, prompt, None)
-                .await
-                .map_err(std::io::Error::other)?
-                .exit_code;
-            if prompt_exit != 0 {
+        if let Some(prompt) = injection.prompt {
+            if prompt.exit_code != 0 {
                 if verbose {
-                    eprintln!("page-agent prompt execution failed with exit code {prompt_exit}");
+                    if !prompt.stderr.is_empty() {
+                        eprintln!("{}", prompt.stderr);
+                    } else {
+                        eprintln!(
+                            "page-agent prompt execution failed with exit code {}",
+                            prompt.exit_code
+                        );
+                    }
                 }
-                return Ok(prompt_exit);
+                return Ok(prompt.exit_code);
             }
         }
     }
@@ -794,7 +839,16 @@ where
         quit_tx,
     );
     if animation.is_none() {
-        println!("oatmeal listening on {}:{}", config.host, config.port);
+        let dashboard_host = if config.host == "0.0.0.0" {
+            "localhost".to_string()
+        } else {
+            config.host.clone()
+        };
+        println!(
+            "http streaming: http://{}:{}/mcp",
+            dashboard_host, config.port
+        );
+        println!("cache folder: {}", oatmeal_cache_dir_text());
     }
 
     let serve_result =
@@ -934,6 +988,14 @@ mod tests {
             CliMode::Version
         );
         assert_eq!(parse_cli(&[OsString::from("--clean")]).mode, CliMode::Clean);
+        assert_eq!(
+            parse_cli(&[OsString::from("--cache-dir")]).mode,
+            CliMode::CacheDir
+        );
+        assert_eq!(
+            parse_cli(&[OsString::from("cache-dir")]).mode,
+            CliMode::CacheDir
+        );
         assert_eq!(
             parse_cli(&[OsString::from("--screenshot")]).mode,
             CliMode::Screenshot

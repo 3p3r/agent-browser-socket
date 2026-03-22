@@ -63,7 +63,7 @@ impl SandboxSyncFilter {
     }
 }
 
-pub fn sandbox_path_to_relative(path: &Path) -> Option<PathBuf> {
+fn sanitize_relative_path(path: &Path) -> Option<PathBuf> {
     let mut relative = PathBuf::new();
     for component in path.components() {
         match component {
@@ -80,6 +80,16 @@ pub fn sandbox_path_to_relative(path: &Path) -> Option<PathBuf> {
     }
 }
 
+pub fn sandbox_path_to_relative(path: &Path, root: &Path) -> Option<PathBuf> {
+    if let Ok(stripped) = path.strip_prefix(root) {
+        if let Some(relative) = sanitize_relative_path(stripped) {
+            return Some(relative);
+        }
+    }
+
+    sanitize_relative_path(path)
+}
+
 pub fn prepare_sandbox_files<'a>(
     root: &Path,
     sandbox_ignore: Option<&Path>,
@@ -89,7 +99,7 @@ pub fn prepare_sandbox_files<'a>(
     let mut prepared = Vec::new();
 
     for file in files {
-        let Some(relative_path) = sandbox_path_to_relative(file.path.as_path()) else {
+        let Some(relative_path) = sandbox_path_to_relative(file.path.as_path(), root) else {
             continue;
         };
         if filter.is_ignored(relative_path.as_path()) {
@@ -158,5 +168,14 @@ mod tests {
         assert_eq!(prepared[0].relative_path, PathBuf::from("keep.txt"));
 
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn strips_root_prefix_when_file_is_under_root() {
+        let root = Path::new("/home/sep/.cache");
+        let relative =
+            sandbox_path_to_relative(Path::new("/home/sep/.cache/tmp/report.png"), root).unwrap();
+
+        assert_eq!(relative, PathBuf::from("tmp/report.png"));
     }
 }

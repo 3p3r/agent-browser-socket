@@ -1,10 +1,12 @@
-use crate::bashkit_executor::BashkitExecutor;
-use crate::command_args::prepare_command;
+use crate::command_runtime::{
+    execute_prepared_command, prepare_script_command, CommandExecutionMode,
+};
 use crate::configuration::{AppConfig, PageAgentConfig};
-use crate::embedded_binary::resolve_binary_path;
-use crate::page_agent_runtime::{run_page_agent_injection, run_page_agent_prompt};
+use crate::embedded_binary::{cache_root_dir, resolve_binary_path};
+use crate::runtime_shared::{
+    capture_system_screenshots, oatmeal_cache_dir_payload, oatmeal_version, oatmeal_version_payload,
+};
 use crate::sandbox_files::prepare_sandbox_files;
-use crate::screenshot::capture_all_screenshots;
 use axum::extract::Path as AxumPath;
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -89,12 +91,17 @@ pub struct DeleteResourceInput {
 #[schemars(description = "Delete all generated MCP resources currently held by the server.")]
 pub struct DeleteAllResourcesInput {}
 
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(
+    description = "Return the cache directory used by oatmeal for embedded assets and MCP-side file outputs."
+)]
+pub struct CacheDirectoryInput {}
+
 #[derive(Clone)]
 pub struct SystemMcpServer {
     binary_path: PathBuf,
     page_agent_config: PageAgentConfig,
     resource_store: ResourceStore,
-    executor: BashkitExecutor,
     tool_router: ToolRouter<Self>,
 }
 
@@ -130,12 +137,10 @@ impl SystemMcpServer {
         page_agent_config: PageAgentConfig,
         resource_store: ResourceStore,
     ) -> Self {
-        let executor = BashkitExecutor::new(binary_path.clone());
         Self {
             binary_path,
             page_agent_config,
             resource_store,
-            executor,
             tool_router: Self::tool_router(),
         }
     }
@@ -155,11 +160,23 @@ impl SystemMcpServer {
         description = "Return the running oatmeal version as JSON"
     )]
     async fn version(&self) -> Result<CallToolResult, McpError> {
-        let version_info = serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION")
-        });
+        let version_info = oatmeal_version_payload();
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&version_info).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
+        name = "cache_directory",
+        description = "Return the cache directory used by oatmeal for embedded assets and MCP-side file outputs"
+    )]
+    async fn cache_directory(
+        &self,
+        Parameters(_input): Parameters<CacheDirectoryInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let payload = oatmeal_cache_dir_payload();
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&payload).unwrap_or_default(),
         )]))
     }
 
@@ -171,19 +188,9 @@ impl SystemMcpServer {
         &self,
         Parameters(_input): Parameters<SystemScreenshotInput>,
     ) -> Result<CallToolResult, McpError> {
-        let screenshots = match std::panic::catch_unwind(capture_all_screenshots) {
-            Ok(Ok(screenshots)) => screenshots,
-            Ok(Err(error)) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "screenshot failed: {}",
-                    error
-                ))]))
-            }
-            Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "screenshot failed: panic in capture backend".to_string(),
-                )]))
-            }
+        let screenshots = match capture_system_screenshots() {
+            Ok(screenshots) => screenshots,
+            Err(error) => return Ok(CallToolResult::error(vec![Content::text(error)])),
         };
 
         let mut contents = Vec::new();
@@ -218,71 +225,44 @@ impl SystemMcpServer {
         &self,
         Parameters(input): Parameters<ShellCommandInput>,
     ) -> Result<CallToolResult, McpError> {
-        let prepared =
-            prepare_command(&input.command).map_err(|msg| McpError::invalid_params(msg, None))?;
+        let prepared = prepare_script_command(&input.command)
+            .map_err(|msg| McpError::invalid_params(msg, None))?;
 
-        let execution = self.executor.execute(&prepared, input.env.as_ref()).await;
-        let stdout = execution.stdout;
-        let stderr = execution.stderr;
-        let exit_code = execution.exit_code;
+        let result = execute_prepared_command(
+            &self.binary_path,
+            &self.page_agent_config,
+            prepared,
+            input.env.as_ref(),
+            CommandExecutionMode::Mcp {
+                cache_root: cache_root_dir(),
+            },
+        )
+        .await;
+        let stdout = result.execution.stdout;
+        let stderr = result.execution.stderr;
+        let exit_code = result.execution.exit_code;
 
-        let page_agent_injection = if prepared.should_inject_page_agent && exit_code == 0 {
-            match run_page_agent_injection(
-                &self.binary_path,
-                &self.page_agent_config,
-                input.env.as_ref(),
-            )
-            .await
-            {
-                Ok(injection_exit) => {
-                    let prompt_output = if injection_exit == 0 {
-                        if let Some(prompt) = prepared.agentic_prompt.as_ref() {
-                            match run_page_agent_prompt(
-                                &self.binary_path,
-                                prompt,
-                                input.env.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok(prompt_result) => Some(serde_json::json!({
-                                    "stdout": prompt_result.stdout,
-                                    "stderr": prompt_result.stderr,
-                                    "exit_code": prompt_result.exit_code
-                                })),
-                                Err(error) => Some(serde_json::json!({
-                                    "stdout": "",
-                                    "stderr": error,
-                                    "exit_code": -1
-                                })),
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
+        let page_agent_injection = result.page_agent_injection.map(|injection| {
+            let prompt_output = injection.prompt.map(|prompt| {
+                serde_json::json!({
+                    "stdout": prompt.stdout,
+                    "stderr": prompt.stderr,
+                    "exit_code": prompt.exit_code
+                })
+            });
 
-                    Some(serde_json::json!({
-                        "stdout": "",
-                        "stderr": "",
-                        "exit_code": injection_exit,
-                        "prompt": prompt_output
-                    }))
-                }
-                Err(error) => Some(serde_json::json!({
-                    "stdout": "",
-                    "stderr": error,
-                    "exit_code": -1
-                })),
-            }
-        } else {
-            None
-        };
+            serde_json::json!({
+                "stdout": injection.stdout,
+                "stderr": injection.stderr,
+                "exit_code": injection.exit_code,
+                "prompt": prompt_output
+            })
+        });
 
         let filtered_files = prepare_sandbox_files(
-            Path::new("."),
+            cache_root_dir().as_path(),
             input.sandbox_ignore.as_deref().map(Path::new),
-            &execution.files,
+            &result.execution.files,
         )
         .map_err(|error| {
             McpError::invalid_params(error.to_string(), Option::<serde_json::Value>::None)
@@ -392,7 +372,7 @@ impl ServerHandler for SystemMcpServer {
         )
             .with_server_info(Implementation::new(
                 "oatmeal",
-                env!("CARGO_PKG_VERSION"),
+                oatmeal_version(),
             ))
             .with_instructions(
                 "Oatmeal provides browser automation and sandboxed shell tooling over MCP. \
@@ -544,6 +524,7 @@ async fn skills_file_handler(AxumPath(path): AxumPath<String>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_shared::oatmeal_cache_dir_text;
 
     #[tokio::test]
     async fn command_preserves_paths_and_applies_ignore_filter() {
@@ -660,6 +641,26 @@ mod tests {
 
         drop(store);
         let _ = std::fs::remove_file(&shell_path);
+    }
+
+    #[tokio::test]
+    async fn cache_directory_returns_cache_root() {
+        let binary_path = resolve_binary_path(None).expect("resolve binary path");
+        let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
+        let server = SystemMcpServer::new(binary_path, PageAgentConfig::default(), resource_store);
+
+        let result = server
+            .cache_directory(Parameters(CacheDirectoryInput {}))
+            .await
+            .expect("cache_directory tool should succeed");
+
+        let value = serde_json::to_value(&result).expect("serialize tool result value");
+        let text = value
+            .pointer("/content/0/text")
+            .and_then(|value| value.as_str())
+            .expect("first content text");
+
+        assert!(text.contains(&oatmeal_cache_dir_text()), "text={text}");
     }
 }
 

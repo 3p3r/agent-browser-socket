@@ -11,8 +11,12 @@ use std::os::unix::fs::PermissionsExt;
 const EMBEDDED_BINARY_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agent-browser-bin.gz"));
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub fn cache_root_dir() -> PathBuf {
+    cache_dir().unwrap_or_else(std::env::temp_dir)
+}
+
 fn cached_binary_path() -> PathBuf {
-    let cache_root = cache_dir().unwrap_or_else(std::env::temp_dir);
+    let cache_root = cache_root_dir();
     let app_dir = cache_root.join("oatmeal");
     let file_name = if cfg!(windows) {
         "agent-browser.exe"

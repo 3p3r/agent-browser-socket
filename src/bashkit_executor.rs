@@ -2,15 +2,26 @@ use crate::command_args::PreparedCommand;
 use bashkit::{async_trait, Bash, Builtin, BuiltinContext, ExecResult, FileSystem, InMemoryFs};
 use ftmi::extract_paths_from_text;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Stdio as ProcessStdio;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+
+static CAPTURE_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub struct BashkitExecutor {
     binary_path: PathBuf,
+    path_policy: AgentBrowserPathPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub enum AgentBrowserPathPolicy {
+    HostNative,
+    McpCacheRooted(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -38,16 +49,47 @@ pub struct ExecutionResult {
 #[derive(Clone)]
 struct AgentBrowserBuiltin {
     binary_path: PathBuf,
+    path_policy: AgentBrowserPathPolicy,
+    output_path_hints: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 #[async_trait]
 impl Builtin for AgentBrowserBuiltin {
     async fn execute(&self, ctx: BuiltinContext<'_>) -> bashkit::Result<ExecResult> {
+        let command_args = match rewrite_agent_browser_args(
+            ctx.args,
+            &self.path_policy,
+            &self.output_path_hints,
+        ) {
+            Ok(args) => args,
+            Err(result) => return Ok(result),
+        };
+        let stdout_path = capture_file_path("stdout");
+        let stderr_path = capture_file_path("stderr");
+        let stdout_file = match File::create(&stdout_path) {
+            Ok(file) => file,
+            Err(error) => {
+                return Ok(ExecResult::err(
+                    format!("agent-browser: failed to create stdout capture: {error}\n"),
+                    1,
+                ))
+            }
+        };
+        let stderr_file = match File::create(&stderr_path) {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = std::fs::remove_file(&stdout_path);
+                return Ok(ExecResult::err(
+                    format!("agent-browser: failed to create stderr capture: {error}\n"),
+                    1,
+                ));
+            }
+        };
         let mut command = Command::new(&self.binary_path);
         command
-            .args(ctx.args)
-            .stdout(ProcessStdio::piped())
-            .stderr(ProcessStdio::piped());
+            .args(&command_args)
+            .stdout(ProcessStdio::from(stdout_file))
+            .stderr(ProcessStdio::from(stderr_file));
 
         if ctx.stdin.is_some() {
             command.stdin(ProcessStdio::piped());
@@ -76,11 +118,17 @@ impl Builtin for AgentBrowserBuiltin {
             }
         }
 
-        match child.wait_with_output().await {
-            Ok(output) => Ok(ExecResult {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code().unwrap_or(1),
+        let wait_result = child.wait().await;
+        let stdout = read_capture_file(&stdout_path);
+        let stderr = read_capture_file(&stderr_path);
+        let _ = std::fs::remove_file(&stdout_path);
+        let _ = std::fs::remove_file(&stderr_path);
+
+        match wait_result {
+            Ok(status) => Ok(ExecResult {
+                stdout,
+                stderr,
+                exit_code: status.code().unwrap_or(1),
                 ..Default::default()
             }),
             Err(error) => Ok(ExecResult::err(
@@ -95,9 +143,31 @@ impl Builtin for AgentBrowserBuiltin {
     }
 }
 
+fn capture_file_path(kind: &str) -> PathBuf {
+    let id = CAPTURE_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "oatmeal-agent-browser-{kind}-{}-{id}.log",
+        std::process::id()
+    ))
+}
+
+fn read_capture_file(path: &Path) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        Err(_) => String::new(),
+    }
+}
+
 impl BashkitExecutor {
     pub fn new(binary_path: PathBuf) -> Self {
-        Self { binary_path }
+        Self::new_with_path_policy(binary_path, AgentBrowserPathPolicy::HostNative)
+    }
+
+    pub fn new_with_path_policy(binary_path: PathBuf, path_policy: AgentBrowserPathPolicy) -> Self {
+        Self {
+            binary_path,
+            path_policy,
+        }
     }
 
     pub async fn execute(
@@ -107,6 +177,7 @@ impl BashkitExecutor {
     ) -> ExecutionResult {
         let sandbox_fs = Arc::new(InMemoryFs::new());
         let baseline_files = collect_file_paths(sandbox_fs.as_ref()).await;
+        let output_path_hints = Arc::new(Mutex::new(Vec::new()));
 
         let pre_existing: HashSet<PathBuf> = command
             .referenced_paths
@@ -119,6 +190,16 @@ impl BashkitExecutor {
             "agent-browser",
             Box::new(AgentBrowserBuiltin {
                 binary_path: self.binary_path.clone(),
+                path_policy: self.path_policy.clone(),
+                output_path_hints: output_path_hints.clone(),
+            }),
+        );
+        builder = builder.builtin(
+            "ab",
+            Box::new(AgentBrowserBuiltin {
+                binary_path: self.binary_path.clone(),
+                path_policy: self.path_policy.clone(),
+                output_path_hints: output_path_hints.clone(),
             }),
         );
         builder = builder.fs(sandbox_fs.clone());
@@ -144,6 +225,12 @@ impl BashkitExecutor {
                     .iter()
                     .cloned()
                     .chain(output_paths)
+                    .chain(
+                        output_path_hints
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone(),
+                    )
                     .collect();
                 files.extend(collect_real_files(&all_paths, &pre_existing));
 
@@ -162,6 +249,136 @@ impl BashkitExecutor {
             },
         }
     }
+}
+
+fn rewrite_agent_browser_args(
+    args: &[String],
+    path_policy: &AgentBrowserPathPolicy,
+    output_path_hints: &Arc<Mutex<Vec<PathBuf>>>,
+) -> Result<Vec<String>, ExecResult> {
+    let Some(output_index) = output_arg_index(args) else {
+        return Ok(args.to_vec());
+    };
+
+    let Some(rewritten_path) = rewrite_output_path(&args[output_index], path_policy) else {
+        return Ok(args.to_vec());
+    };
+
+    if let Some(parent) = rewritten_path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            return Err(ExecResult::err(
+                format!(
+                    "agent-browser: failed to create output directory {}: {error}\n",
+                    parent.display()
+                ),
+                1,
+            ));
+        }
+    }
+
+    output_path_hints
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(rewritten_path.clone());
+
+    let mut rewritten = args.to_vec();
+    rewritten[output_index] = rewritten_path.display().to_string();
+    Ok(rewritten)
+}
+
+fn output_arg_index(args: &[String]) -> Option<usize> {
+    let subcommand_index = args.iter().position(|arg| !arg.starts_with('-'))?;
+    let subcommand = args.get(subcommand_index)?;
+    if subcommand != "screenshot" && subcommand != "pdf" {
+        return None;
+    }
+
+    let positional_indices: Vec<_> = args
+        .iter()
+        .enumerate()
+        .skip(subcommand_index + 1)
+        .filter_map(|(index, arg)| (!arg.starts_with('-')).then_some(index))
+        .collect();
+
+    if positional_indices.len() >= 2 {
+        return positional_indices.last().copied();
+    }
+
+    let single_index = positional_indices.first().copied()?;
+    looks_like_output_path(&args[single_index]).then_some(single_index)
+}
+
+fn looks_like_output_path(arg: &str) -> bool {
+    if arg.contains("://") || arg.starts_with("about:") {
+        return false;
+    }
+
+    arg.starts_with('/')
+        || arg.starts_with("./")
+        || arg.starts_with("../")
+        || arg.starts_with('~')
+        || arg.contains('\\')
+        || arg.contains('/')
+        || is_windows_drive_path(arg)
+        || [
+            ".png", ".jpg", ".jpeg", ".webp", ".pdf", ".csv", ".json", ".yaml", ".yml",
+        ]
+        .iter()
+        .any(|suffix| arg.to_ascii_lowercase().ends_with(suffix))
+}
+
+fn rewrite_output_path(arg: &str, path_policy: &AgentBrowserPathPolicy) -> Option<PathBuf> {
+    match path_policy {
+        AgentBrowserPathPolicy::HostNative => None,
+        AgentBrowserPathPolicy::McpCacheRooted(cache_root) => {
+            Some(cache_root.join(path_to_cache_relative(arg)))
+        }
+    }
+}
+
+fn path_to_cache_relative(raw: &str) -> PathBuf {
+    if let Some(relative) = windows_drive_relative(raw) {
+        return relative;
+    }
+
+    if raw.starts_with('/') || raw.starts_with('\\') {
+        return split_path_components(raw);
+    }
+
+    if raw.contains('\\') {
+        return split_path_components(raw);
+    }
+
+    PathBuf::from(raw)
+}
+
+fn windows_drive_relative(raw: &str) -> Option<PathBuf> {
+    if !is_windows_drive_path(raw) {
+        return None;
+    }
+
+    let mut relative = PathBuf::new();
+    relative.push(&raw[..1]);
+    for segment in raw[2..].split(['/', '\\']) {
+        if !segment.is_empty() {
+            relative.push(segment);
+        }
+    }
+    Some(relative)
+}
+
+fn is_windows_drive_path(raw: &str) -> bool {
+    raw.len() >= 2 && raw.as_bytes()[1] == b':' && raw.as_bytes()[0].is_ascii_alphabetic()
+}
+
+fn split_path_components(raw: &str) -> PathBuf {
+    let mut relative = PathBuf::new();
+    for segment in raw.split(['/', '\\']) {
+        if !segment.is_empty() {
+            relative.push(segment);
+        }
+    }
+    relative
 }
 
 async fn collect_file_paths(fs: &InMemoryFs) -> HashSet<PathBuf> {
@@ -274,6 +491,9 @@ fn guess_mime_type(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::command_args::prepare_command;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn execute_collects_new_root_file() {
@@ -327,6 +547,66 @@ mod tests {
         assert_eq!(output.origin, SandboxFileOrigin::Sandbox);
     }
 
+    #[tokio::test]
+    async fn execute_supports_ab_alias_for_agent_browser() {
+        let tmp = std::env::temp_dir().join(format!(
+            "oatmeal-ab-alias-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let script_path = tmp.join("agent-browser");
+        std::fs::write(&script_path, "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\"\n").unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let executor = BashkitExecutor::new(script_path);
+        let command = prepare_command("ab screenshot /tmp/out.png").unwrap();
+        let result = executor.execute(&command, None).await;
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "screenshot /tmp/out.png\n");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn execute_returns_after_direct_process_exits_even_if_child_keeps_output_open() {
+        let tmp = std::env::temp_dir().join(format!(
+            "oatmeal-daemon-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let script_path = tmp.join("agent-browser");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\nprintf 'ready\\n'\n(sleep 2) &\nexit 0\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let executor = BashkitExecutor::new(script_path.clone());
+        let command = prepare_command("agent-browser open https://example.com").unwrap();
+
+        let result =
+            tokio::time::timeout(Duration::from_millis(800), executor.execute(&command, None))
+                .await
+                .expect("daemon-style command should return after direct process exits");
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "ready\n");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
     #[test]
     fn collect_real_files_skips_pre_existing() {
         let tmp = std::env::temp_dir().join(format!(
@@ -352,5 +632,103 @@ mod tests {
         assert_eq!(files[0].origin, SandboxFileOrigin::RealFs);
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn mcp_path_policy_rewrites_windows_screenshot_output_into_cache_root() {
+        let hints = Arc::new(Mutex::new(Vec::new()));
+        let args = vec![
+            "screenshot".to_string(),
+            "https://github.com".to_string(),
+            r"C:\Users\sep\.cache\sample.png".to_string(),
+        ];
+
+        let rewritten = rewrite_agent_browser_args(
+            &args,
+            &AgentBrowserPathPolicy::McpCacheRooted(PathBuf::from("/home/sep/.cache")),
+            &hints,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rewritten[2],
+            "/home/sep/.cache/C/Users/sep/.cache/sample.png"
+        );
+        assert_eq!(
+            hints.lock().unwrap()[0],
+            PathBuf::from("/home/sep/.cache/C/Users/sep/.cache/sample.png")
+        );
+    }
+
+    #[test]
+    fn mcp_path_policy_rewrites_rooted_unix_screenshot_output_into_cache_root() {
+        let hints = Arc::new(Mutex::new(Vec::new()));
+        let args = vec![
+            "screenshot".to_string(),
+            "https://github.com".to_string(),
+            "/tmp/sample.png".to_string(),
+        ];
+
+        let rewritten = rewrite_agent_browser_args(
+            &args,
+            &AgentBrowserPathPolicy::McpCacheRooted(PathBuf::from("/home/sep/.cache")),
+            &hints,
+        )
+        .unwrap();
+
+        assert_eq!(rewritten[2], "/home/sep/.cache/tmp/sample.png");
+        assert_eq!(
+            hints.lock().unwrap()[0],
+            PathBuf::from("/home/sep/.cache/tmp/sample.png")
+        );
+    }
+
+    #[test]
+    fn mcp_path_policy_rewrites_windows_pdf_output_into_cache_root() {
+        let hints = Arc::new(Mutex::new(Vec::new()));
+        let args = vec![
+            "pdf".to_string(),
+            "https://github.com".to_string(),
+            r"C:\Users\sep\.cache\sample.pdf".to_string(),
+        ];
+
+        let rewritten = rewrite_agent_browser_args(
+            &args,
+            &AgentBrowserPathPolicy::McpCacheRooted(PathBuf::from("/home/sep/.cache")),
+            &hints,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rewritten[2],
+            "/home/sep/.cache/C/Users/sep/.cache/sample.pdf"
+        );
+        assert_eq!(
+            hints.lock().unwrap()[0],
+            PathBuf::from("/home/sep/.cache/C/Users/sep/.cache/sample.pdf")
+        );
+    }
+
+    #[test]
+    fn mcp_path_policy_rewrites_relative_pdf_output_into_cache_root() {
+        let hints = Arc::new(Mutex::new(Vec::new()));
+        let args = vec![
+            "pdf".to_string(),
+            "https://github.com".to_string(),
+            "sample.pdf".to_string(),
+        ];
+
+        let rewritten = rewrite_agent_browser_args(
+            &args,
+            &AgentBrowserPathPolicy::McpCacheRooted(PathBuf::from("/home/sep/.cache")),
+            &hints,
+        )
+        .unwrap();
+
+        assert_eq!(rewritten[2], "/home/sep/.cache/sample.pdf");
+        assert_eq!(
+            hints.lock().unwrap()[0],
+            PathBuf::from("/home/sep/.cache/sample.pdf")
+        );
     }
 }

@@ -4,6 +4,8 @@ mod bashkit_executor;
 mod browser_detection;
 #[path = "../src/command_args.rs"]
 mod command_args;
+#[path = "../src/command_runtime.rs"]
+mod command_runtime;
 #[path = "../src/configuration.rs"]
 mod configuration;
 #[path = "../src/embedded_binary.rs"]
@@ -12,6 +14,8 @@ mod embedded_binary;
 mod mcp;
 #[path = "../src/page_agent_runtime.rs"]
 mod page_agent_runtime;
+#[path = "../src/runtime_shared.rs"]
+mod runtime_shared;
 #[path = "../src/sandbox_files.rs"]
 mod sandbox_files;
 #[path = "../src/screenshot.rs"]
@@ -30,6 +34,11 @@ fn touch_imported_symbols() {
     let _ = configuration::load_config;
     let _ = embedded_binary::clean_cached_binary;
     let _ = mcp::run_mcp_stdio;
+    let _ = runtime_shared::oatmeal_version;
+    let _ = runtime_shared::oatmeal_version_text;
+    let _ = runtime_shared::oatmeal_version_payload;
+    let _ = runtime_shared::capture_system_screenshots;
+    let _ = command_runtime::CommandExecutionMode::Cli;
     let _ = &server::URI_SCHEME;
     let _ = server::unregister_uri_scheme;
 }
