@@ -59,7 +59,7 @@ fn create_clean_home() -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let home = std::env::temp_dir().join(format!("abs-home-{unique}"));
+    let home = std::env::temp_dir().join(format!("oatmeal-home-{unique}"));
     std::fs::create_dir_all(&home).expect("create clean home");
     home
 }
@@ -69,7 +69,7 @@ fn create_clean_cache_root() -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let cache = std::env::temp_dir().join(format!("abs-cache-{unique}"));
+    let cache = std::env::temp_dir().join(format!("oatmeal-cache-{unique}"));
     std::fs::create_dir_all(&cache).expect("create clean cache root");
     cache
 }
@@ -103,7 +103,7 @@ fn create_temp_test_dir(name: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("abs-{name}-{unique}"));
+    let dir = std::env::temp_dir().join(format!("oatmeal-{name}-{unique}"));
     std::fs::create_dir_all(&dir).expect("create temp test dir");
     dir
 }
@@ -118,10 +118,10 @@ fn mirrored_export_path(base: &Path, source: &Path) -> PathBuf {
     base.join(relative)
 }
 
-fn clear_abs_env() {
+fn clear_oatmeal_env() {
     let keys: Vec<String> = std::env::vars()
         .filter_map(|(key, _)| {
-            if key.starts_with("ABS_") {
+            if key.starts_with("OATMEAL_") {
                 Some(key)
             } else {
                 None
@@ -146,9 +146,9 @@ fn resolve_wrapper_executable() -> PathBuf {
     }
 
     let exe_name = if cfg!(windows) {
-        "agent-browser-server.exe"
+        "oatmeal.exe"
     } else {
-        "agent-browser-server"
+        "oatmeal"
     };
     let candidate = path.join(exe_name);
 
@@ -271,7 +271,7 @@ async fn auth_check_maps_status_codes() {
 #[test]
 fn configuration_uses_embedded_defaults_when_no_sources_exist() {
     let _guard = lock_env();
-    clear_abs_env();
+    clear_oatmeal_env();
 
     let clean_home = create_clean_home();
     let _home_guard = EnvVarGuard::set("HOME", clean_home.as_os_str());
@@ -279,7 +279,7 @@ fn configuration_uses_embedded_defaults_when_no_sources_exist() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let working_dir = std::env::temp_dir().join(format!("abs-defaults-{unique}"));
+    let working_dir = std::env::temp_dir().join(format!("oatmeal-defaults-{unique}"));
     std::fs::create_dir_all(&working_dir).expect("create working dir");
     let _cwd = DirGuard::enter(&working_dir);
 
@@ -292,34 +292,34 @@ fn configuration_uses_embedded_defaults_when_no_sources_exist() {
     assert_eq!(cfg.page_agent.url, "http://localhost:11434/v1");
     assert_eq!(cfg.page_agent.key, "NA");
 
-    clear_abs_env();
+    clear_oatmeal_env();
 }
 
 #[test]
-fn configuration_local_abs_file_overrides_home_and_defaults() {
+fn configuration_local_oatmeal_file_overrides_home_and_defaults() {
     let _guard = lock_env();
-    clear_abs_env();
+    clear_oatmeal_env();
 
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("abs-config-{unique}"));
+    let root = std::env::temp_dir().join(format!("oatmeal-config-{unique}"));
     let home = root.join("home");
     let local = root.join("work");
     std::fs::create_dir_all(&home).expect("create home dir");
     std::fs::create_dir_all(&local).expect("create work dir");
 
     std::fs::write(
-        home.join(".abs"),
+        home.join(".oatmeal"),
         "port = 9101\nhost = \"127.0.0.2\"\n[page_agent]\nmodel = \"home-model\"\nurl = \"http://home.local/v1\"\nkey = \"home-key\"\n",
     )
-        .expect("write home abs");
+        .expect("write home oatmeal");
     std::fs::write(
-        local.join(".abs"),
+        local.join(".oatmeal"),
         "port = 9999\nhost = \"127.0.0.9\"\n[page_agent]\nmodel = \"local-model\"\nurl = \"http://local.local/v1\"\nkey = \"local-key\"\n",
     )
-        .expect("write local abs");
+        .expect("write local oatmeal");
 
     let _home_guard = EnvVarGuard::set("HOME", home.as_os_str());
     let _cwd = DirGuard::enter(&local);
@@ -331,48 +331,48 @@ fn configuration_local_abs_file_overrides_home_and_defaults() {
     assert_eq!(cfg.page_agent.url, "http://local.local/v1");
     assert_eq!(cfg.page_agent.key, "local-key");
 
-    clear_abs_env();
+    clear_oatmeal_env();
 }
 
 #[test]
 fn configuration_page_agent_env_overrides_file() {
     let _guard = lock_env();
-    clear_abs_env();
+    clear_oatmeal_env();
 
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("abs-config-page-agent-env-{unique}"));
+    let root = std::env::temp_dir().join(format!("oatmeal-config-page-agent-env-{unique}"));
     let home = root.join("home");
     let local = root.join("work");
     std::fs::create_dir_all(&home).expect("create home dir");
     std::fs::create_dir_all(&local).expect("create work dir");
 
     std::fs::write(
-        local.join(".abs"),
+        local.join(".oatmeal"),
         "[page_agent]\nmodel = \"file-model\"\nurl = \"http://file.local/v1\"\nkey = \"file-key\"\n",
     )
-    .expect("write local abs");
+    .expect("write local oatmeal");
 
     let _home_guard = EnvVarGuard::set("HOME", home.as_os_str());
     let _cwd = DirGuard::enter(&local);
-    let _model_guard = EnvVarGuard::set("ABS_PAGE_AGENT__MODEL", "env-model");
-    let _url_guard = EnvVarGuard::set("ABS_PAGE_AGENT__URL", "http://env.local/v1");
-    let _key_guard = EnvVarGuard::set("ABS_PAGE_AGENT__KEY", "env-key");
+    let _model_guard = EnvVarGuard::set("OATMEAL_PAGE_AGENT__MODEL", "env-model");
+    let _url_guard = EnvVarGuard::set("OATMEAL_PAGE_AGENT__URL", "http://env.local/v1");
+    let _key_guard = EnvVarGuard::set("OATMEAL_PAGE_AGENT__KEY", "env-key");
 
     let cfg = configuration::load_config().expect("load config with env override");
     assert_eq!(cfg.page_agent.model, "env-model");
     assert_eq!(cfg.page_agent.url, "http://env.local/v1");
     assert_eq!(cfg.page_agent.key, "env-key");
 
-    clear_abs_env();
+    clear_oatmeal_env();
 }
 
 #[test]
 fn cli_version_and_command_paths_work() {
     let _guard = lock_env();
-    clear_abs_env();
+    clear_oatmeal_env();
 
     let clean_home = create_clean_home();
     let _home_guard = EnvVarGuard::set("HOME", clean_home.as_os_str());
@@ -380,7 +380,7 @@ fn cli_version_and_command_paths_work() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let working_dir = std::env::temp_dir().join(format!("abs-cli-cwd-{unique}"));
+    let working_dir = std::env::temp_dir().join(format!("oatmeal-cli-cwd-{unique}"));
     std::fs::create_dir_all(&working_dir).expect("create cli cwd");
     let _cwd = DirGuard::enter(&working_dir);
 
@@ -392,7 +392,7 @@ fn cli_version_and_command_paths_work() {
         .expect("run --version");
     assert!(version_output.status.success());
     let version_stdout = String::from_utf8_lossy(&version_output.stdout);
-    assert!(version_stdout.contains("agent-browser-server"));
+    assert!(version_stdout.contains("oatmeal"));
 
     let missing_command_output = Command::new(&exe)
         .arg("--command")
@@ -418,13 +418,13 @@ fn cli_version_and_command_paths_work() {
     let passthrough_stdout = String::from_utf8_lossy(&passthrough_output.stdout);
     assert!(passthrough_stdout.contains("agent-browser"));
 
-    clear_abs_env();
+    clear_oatmeal_env();
 }
 
 #[test]
 fn cli_browser_screenshot_exports_real_png() {
     let _guard = lock_env();
-    clear_abs_env();
+    clear_oatmeal_env();
 
     let clean_home = create_clean_home();
     let _home_guard = EnvVarGuard::set("HOME", clean_home.as_os_str());
@@ -474,7 +474,7 @@ fn cli_browser_screenshot_exports_real_png() {
         "real fs screenshot should be moved into sandbox output"
     );
 
-    clear_abs_env();
+    clear_oatmeal_env();
 }
 
 #[test]

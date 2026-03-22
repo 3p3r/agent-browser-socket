@@ -23,23 +23,23 @@ jobs:
           - name: Linux x64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            binary: agent-browser-server-linux-x64
+            binary: oatmeal-linux-x64
           - name: Linux ARM64
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            binary: agent-browser-server-linux-arm64
+            binary: oatmeal-linux-arm64
           - name: Windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: agent-browser-server-windows.exe
+            binary: oatmeal-windows.exe
           - name: macOS x64
             os: macos-latest
             target: x86_64-apple-darwin
-            binary: agent-browser-server-darwin-x64
+            binary: oatmeal-darwin-x64
           - name: macOS ARM64
             os: macos-latest
             target: aarch64-apple-darwin
-            binary: agent-browser-server-darwin-arm64
+            binary: oatmeal-darwin-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -87,14 +87,14 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p artifacts
-          cp target/${{ matrix.target }}/release/agent-browser-server artifacts/${{ matrix.binary }}
+          cp target/${{ matrix.target }}/release/oatmeal artifacts/${{ matrix.binary }}
           chmod +x artifacts/${{ matrix.binary }}
 
       - name: Package binary (Windows)
         if: runner.os == 'Windows'
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/agent-browser-server.exe artifacts/${{ matrix.binary }}
+          Copy-Item target/${{ matrix.target }}/release/oatmeal.exe artifacts/${{ matrix.binary }}
         shell: pwsh
 
       - uses: actions/upload-artifact@v4
@@ -122,31 +122,31 @@ jobs:
         run: |
           mkdir -p bin
           lipo -create \
-            artifacts/agent-browser-server-darwin-x64/agent-browser-server-darwin-x64 \
-            artifacts/agent-browser-server-darwin-arm64/agent-browser-server-darwin-arm64 \
-            -output bin/agent-browser-server-mac
-          chmod +x bin/agent-browser-server-mac
-          lipo -info bin/agent-browser-server-mac
+            artifacts/oatmeal-darwin-x64/oatmeal-darwin-x64 \
+            artifacts/oatmeal-darwin-arm64/oatmeal-darwin-arm64 \
+            -output bin/oatmeal-mac
+          chmod +x bin/oatmeal-mac
+          lipo -info bin/oatmeal-mac
 
       - name: Create Linux self-extracting wrapper
         run: |
-          mkdir -p /tmp/abs-linux-payload
-          cp artifacts/agent-browser-server-linux-x64/agent-browser-server-linux-x64 /tmp/abs-linux-payload/
-          cp artifacts/agent-browser-server-linux-arm64/agent-browser-server-linux-arm64 /tmp/abs-linux-payload/
-          chmod +x /tmp/abs-linux-payload/agent-browser-server-linux-x64
-          chmod +x /tmp/abs-linux-payload/agent-browser-server-linux-arm64
+          mkdir -p /tmp/oatmeal-linux-payload
+          cp artifacts/oatmeal-linux-x64/oatmeal-linux-x64 /tmp/oatmeal-linux-payload/
+          cp artifacts/oatmeal-linux-arm64/oatmeal-linux-arm64 /tmp/oatmeal-linux-payload/
+          chmod +x /tmp/oatmeal-linux-payload/oatmeal-linux-x64
+          chmod +x /tmp/oatmeal-linux-payload/oatmeal-linux-arm64
 
-          cat > bin/agent-browser-server-linux <<'WRAPPER'
+          cat > bin/oatmeal-linux <<'WRAPPER'
           #!/usr/bin/env sh
           set -eu
 
           ARCH="$(uname -m)"
           case "$ARCH" in
             x86_64|amd64)
-              BIN="agent-browser-server-linux-x64"
+              BIN="oatmeal-linux-x64"
               ;;
             aarch64|arm64)
-              BIN="agent-browser-server-linux-arm64"
+              BIN="oatmeal-linux-arm64"
               ;;
             *)
               echo "Unsupported architecture: $ARCH" >&2
@@ -155,47 +155,47 @@ jobs:
           esac
 
           SELF="$0"
-          PAYLOAD_LINE="$(awk '/^__ABS_LINUX_PAYLOAD__$/ { print NR + 1; exit }' "$SELF")"
+          PAYLOAD_LINE="$(awk '/^__OATMEAL_LINUX_PAYLOAD__$/ { print NR + 1; exit }' "$SELF")"
           if [ -z "${PAYLOAD_LINE:-}" ]; then
             echo "Corrupt launcher: missing payload marker" >&2
             exit 1
           fi
 
-          TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/abs-linux.XXXXXX")"
+          TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/oatmeal-linux.XXXXXX")"
           trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 
           tail -n +"$PAYLOAD_LINE" "$SELF" | tar -xzf - -C "$TMPDIR"
           chmod +x "$TMPDIR/$BIN"
           exec "$TMPDIR/$BIN" "$@"
-          __ABS_LINUX_PAYLOAD__
+          __OATMEAL_LINUX_PAYLOAD__
           WRAPPER
 
-          tar -czf /tmp/agent-browser-server-linux-payload.tgz -C /tmp/abs-linux-payload .
-          cat /tmp/agent-browser-server-linux-payload.tgz >> bin/agent-browser-server-linux
-          chmod +x bin/agent-browser-server-linux
-          rm -f /tmp/agent-browser-server-linux-payload.tgz
+          tar -czf /tmp/oatmeal-linux-payload.tgz -C /tmp/oatmeal-linux-payload .
+          cat /tmp/oatmeal-linux-payload.tgz >> bin/oatmeal-linux
+          chmod +x bin/oatmeal-linux
+          rm -f /tmp/oatmeal-linux-payload.tgz
 
       - name: Finalize Windows binary
         run: |
-          cp artifacts/agent-browser-server-windows.exe/agent-browser-server-windows.exe \
-            bin/agent-browser-server-windows.exe
+          cp artifacts/oatmeal-windows.exe/oatmeal-windows.exe \
+            bin/oatmeal-windows.exe
 
       - name: Verify release binaries
         run: |
           ls -la bin/
-          test -f bin/agent-browser-server-mac
-          test -f bin/agent-browser-server-linux
-          test -f bin/agent-browser-server-windows.exe
-          grep -q '^__ABS_LINUX_PAYLOAD__$' bin/agent-browser-server-linux
+          test -f bin/oatmeal-mac
+          test -f bin/oatmeal-linux
+          test -f bin/oatmeal-windows.exe
+          grep -q '^__OATMEAL_LINUX_PAYLOAD__$' bin/oatmeal-linux
 
       - name: Upload universal binaries for testing
         uses: actions/upload-artifact@v4
         with:
           name: universal-binaries
           path: |
-            bin/agent-browser-server-mac
-            bin/agent-browser-server-linux
-            bin/agent-browser-server-windows.exe
+            bin/oatmeal-mac
+            bin/oatmeal-linux
+            bin/oatmeal-windows.exe
           retention-days: 7
 
   test-binaries:
@@ -208,19 +208,19 @@ jobs:
         include:
           - name: Linux x64
             os: ubuntu-22.04
-            binary: agent-browser-server-linux
+            binary: oatmeal-linux
           - name: Linux ARM64
             os: ubuntu-22.04-arm
-            binary: agent-browser-server-linux
+            binary: oatmeal-linux
           - name: macOS x64
             os: macos-latest
-            binary: agent-browser-server-mac
+            binary: oatmeal-mac
           - name: macOS ARM64
             os: macos-latest
-            binary: agent-browser-server-mac
+            binary: oatmeal-mac
           - name: Windows x64
             os: windows-latest
-            binary: agent-browser-server-windows.exe
+            binary: oatmeal-windows.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -269,8 +269,8 @@ jobs:
             --draft \
             --prerelease \
             --notes "Nightly auto-build from \`main\` (${GITHUB_SHA::7})" \
-            bin/agent-browser-server-mac \
-            bin/agent-browser-server-linux \
-            bin/agent-browser-server-windows.exe
+            bin/oatmeal-mac \
+            bin/oatmeal-linux \
+            bin/oatmeal-windows.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

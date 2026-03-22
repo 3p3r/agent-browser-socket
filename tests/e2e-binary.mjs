@@ -6,7 +6,7 @@
  *   node tests/e2e-binary.mjs <path-to-binary>
  *
  * Validates:
- *   1. <binary> --version                       exits 0, stdout contains "agent-browser-server"
+ *   1. <binary> --version                       exits 0, stdout contains "oatmeal"
  *   2. <binary> --verbose --command agent-browser --version   forwards to embedded binary
  */
 
@@ -63,10 +63,7 @@ console.log(`\nTesting binary: ${binaryPath}\n`);
 
 await test("--version prints wrapper version", ["--version"], ({ code, stdout }) => {
   assert(code === 0, `expected exit code 0, got ${code}`);
-  assert(
-    stdout.includes("agent-browser-server"),
-    `stdout should contain "agent-browser-server", got: ${stdout.trim()}`,
-  );
+  assert(stdout.includes("oatmeal"), `stdout should contain "oatmeal", got: ${stdout.trim()}`);
 });
 
 await test(

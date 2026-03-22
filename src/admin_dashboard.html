@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>agent-browser-server launcher</title>
+    <title>oatmeal launcher</title>
     <style>
       body {
         font-family: sans-serif;
@@ -46,8 +46,8 @@
     </style>
   </head>
   <body>
-    <h1>agent-browser-server launcher</h1>
-    <p>Launch via <code>abs://</code> from a webpage.</p>
+    <h1>oatmeal launcher</h1>
+    <p>Launch via <code>oatmeal://</code> from a webpage.</p>
 
     <div class="row">
       <label for="host">Host</label>
@@ -60,7 +60,7 @@
     </div>
 
     <div class="row">
-      <button id="launch">Launch abs://open</button>
+      <button id="launch" type="button">Launch oatmeal://open</button>
     </div>
 
     <div class="row">
@@ -84,7 +84,7 @@
       function buildUri() {
         const host = hostInput.value.trim() || "127.0.0.1";
         const port = portInput.value.trim() || "9607";
-        return `abs://open?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`;
+        return `oatmeal://open?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`;
       }
 
       document.getElementById("launch").addEventListener("click", () => {

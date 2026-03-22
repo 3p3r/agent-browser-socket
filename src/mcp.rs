@@ -58,10 +58,16 @@ fn current_unix_ms() -> u128 {
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(
+    description = "Capture screenshots for every currently attached display and expose them as MCP resources."
+)]
 pub struct SystemScreenshotInput {}
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CommandInput {
+#[schemars(
+    description = "Execute a shell-style script with agent-browser available and return stdout, stderr, exit code, and generated resources."
+)]
+pub struct ShellCommandInput {
     /// Bash script to execute with agent-browser available as a function
     pub command: String,
     /// Optional environment variables
@@ -73,11 +79,14 @@ pub struct CommandInput {
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(description = "Delete a single generated MCP resource by URI.")]
 pub struct DeleteResourceInput {
+    /// Resource URI to delete, for example resource://file/<id>
     pub uri: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(description = "Delete all generated MCP resources currently held by the server.")]
 pub struct DeleteAllResourcesInput {}
 
 #[derive(Clone)]
@@ -131,14 +140,20 @@ impl SystemMcpServer {
         }
     }
 
-    #[tool(name = "health", description = "Check server health status")]
+    #[tool(
+        name = "health",
+        description = "Return a simple liveness status payload"
+    )]
     async fn health(&self) -> Result<CallToolResult, McpError> {
         Ok(CallToolResult::success(vec![Content::text(
             r#"{"status": "ok"}"#,
         )]))
     }
 
-    #[tool(name = "version", description = "Get server version information")]
+    #[tool(
+        name = "version",
+        description = "Return the running oatmeal version as JSON"
+    )]
     async fn version(&self) -> Result<CallToolResult, McpError> {
         let version_info = serde_json::json!({
             "version": env!("CARGO_PKG_VERSION")
@@ -150,7 +165,7 @@ impl SystemMcpServer {
 
     #[tool(
         name = "screenshot_system",
-        description = "Capture screenshots of all system monitors"
+        description = "Capture screenshots of all attached system monitors and expose them as resources"
     )]
     async fn screenshot_system(
         &self,
@@ -196,12 +211,12 @@ impl SystemMcpServer {
     }
 
     #[tool(
-        name = "command",
-        description = "Execute a bash script with agent-browser available"
+        name = "shell_command",
+        description = "Execute a sandboxed shell script with agent-browser available and return output plus generated resources"
     )]
-    async fn command(
+    async fn shell_command(
         &self,
-        Parameters(input): Parameters<CommandInput>,
+        Parameters(input): Parameters<ShellCommandInput>,
     ) -> Result<CallToolResult, McpError> {
         let prepared =
             prepare_command(&input.command).map_err(|msg| McpError::invalid_params(msg, None))?;
@@ -306,7 +321,7 @@ impl SystemMcpServer {
 
     #[tool(
         name = "delete_resource",
-        description = "Delete a generated MCP resource by URI"
+        description = "Delete one generated MCP resource by URI"
     )]
     async fn delete_resource(
         &self,
@@ -330,7 +345,7 @@ impl SystemMcpServer {
 
     #[tool(
         name = "delete_all_resources",
-        description = "Delete all generated MCP resources"
+        description = "Delete all generated MCP resources held by the current server"
     )]
     async fn delete_all_resources(
         &self,
@@ -346,7 +361,10 @@ impl SystemMcpServer {
         )]))
     }
 
-    #[tool(name = "shutdown", description = "Shutdown the MCP server")]
+    #[tool(
+        name = "shutdown",
+        description = "Gracefully shut down the oatmeal MCP server"
+    )]
     async fn shutdown(&self) -> Result<CallToolResult, McpError> {
         let response = serde_json::json!({"status": "closing"});
 
@@ -373,12 +391,12 @@ impl ServerHandler for SystemMcpServer {
                 .build(),
         )
             .with_server_info(Implementation::new(
-                "agent-browser-server",
+                "oatmeal",
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "MCP server for browser automation and system tooling. \
-                 Tools: health, version, shutdown, screenshot_system, command, delete_resource, delete_all_resources."
+                "Oatmeal provides browser automation and sandboxed shell tooling over MCP. \
+                 Use shell_command for agent-browser scripts, screenshot_system for desktop captures, and the delete_* tools to manage generated resources."
                     .to_string(),
             )
     }
@@ -512,7 +530,7 @@ fn render_skills_index_html() -> String {
     }
 
     format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"UTF-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" /><title>agent-browser-server skills</title><style>body{{font-family:sans-serif;margin:24px;max-width:760px;}}h1{{margin-bottom:8px;}}ul{{line-height:1.6;}}</style></head><body><h1>Skills</h1><ul>{items}</ul></body></html>"
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"UTF-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" /><title>oatmeal skills</title><style>body{{font-family:sans-serif;margin:24px;max-width:760px;}}h1{{margin-bottom:8px;}}ul{{line-height:1.6;}}</style></head><body><h1>Skills</h1><ul>{items}</ul></body></html>"
     )
 }
 
@@ -556,13 +574,13 @@ mod tests {
         );
 
         let result = server
-            .command(Parameters(CommandInput {
+            .shell_command(Parameters(ShellCommandInput {
                 command,
                 env: None,
                 sandbox_ignore: Some(ignore_path.display().to_string()),
             }))
             .await
-            .expect("command tool should succeed");
+            .expect("shell_command tool should succeed");
 
         assert_eq!(result.content.len(), 2);
 
@@ -611,13 +629,13 @@ mod tests {
         );
 
         let result = server
-            .command(Parameters(CommandInput {
+            .shell_command(Parameters(ShellCommandInput {
                 command,
                 env: None,
                 sandbox_ignore: None,
             }))
             .await
-            .expect("command tool should succeed");
+            .expect("shell_command tool should succeed");
 
         assert_eq!(result.content.len(), 2);
         let value = serde_json::to_value(&result).expect("serialize tool result value");

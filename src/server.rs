@@ -3,7 +3,7 @@ use once_cell::sync::Lazy;
 use secure_string::SecureString;
 use std::error::Error as StdError;
 
-pub static URI_SCHEME: Lazy<SecureString> = Lazy::new(|| SecureString::from("abs"));
+pub static URI_SCHEME: Lazy<SecureString> = Lazy::new(|| SecureString::from("oatmeal"));
 const PAGE_AGENT_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/page-agent.demo.sanitized.js"));
 
 pub fn render_page_agent_bundle(config: &PageAgentConfig) -> String {

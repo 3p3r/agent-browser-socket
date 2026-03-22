@@ -44,11 +44,14 @@ impl Default for AppConfig {
 
 pub fn load_config() -> Result<AppConfig, config::ConfigError> {
     let defaults = AppConfig::default();
-    let home_abs = home_dir().map(|home| home.join(".abs"));
-    let local_abs = std::path::Path::new(".abs").to_path_buf();
-    let has_home_abs = home_abs.as_ref().map(|path| path.exists()).unwrap_or(false);
-    let has_local_abs = local_abs.exists();
-    let has_abs_env = env::vars().any(|(key, _)| key.starts_with("ABS_"));
+    let home_oatmeal = home_dir().map(|home| home.join(".oatmeal"));
+    let local_oatmeal = std::path::Path::new(".oatmeal").to_path_buf();
+    let has_home_oatmeal = home_oatmeal
+        .as_ref()
+        .map(|path| path.exists())
+        .unwrap_or(false);
+    let has_local_oatmeal = local_oatmeal.exists();
+    let has_oatmeal_env = env::vars().any(|(key, _)| key.starts_with("OATMEAL_"));
 
     let mut builder = Config::builder()
         .set_default("auth_url", defaults.auth_url)?
@@ -59,7 +62,7 @@ pub fn load_config() -> Result<AppConfig, config::ConfigError> {
         .set_default("page_agent.url", defaults.page_agent.url)?
         .set_default("page_agent.key", defaults.page_agent.key)?;
 
-    if !has_home_abs && !has_local_abs && !has_abs_env {
+    if !has_home_oatmeal && !has_local_oatmeal && !has_oatmeal_env {
         let embedded_default = embedded_secure_default_config();
         builder = builder.add_source(File::from_str(
             embedded_default.unsecure(),
@@ -67,28 +70,28 @@ pub fn load_config() -> Result<AppConfig, config::ConfigError> {
         ));
     }
 
-    if let Some(home_abs) = home_abs {
+    if let Some(home_oatmeal) = home_oatmeal {
         builder = builder.add_source(
-            File::new(home_abs.to_string_lossy().as_ref(), FileFormat::Toml).required(false),
+            File::new(home_oatmeal.to_string_lossy().as_ref(), FileFormat::Toml).required(false),
         );
     }
 
     builder = builder
-        .add_source(File::new(".abs", FileFormat::Toml).required(false))
-        .add_source(Environment::with_prefix("ABS").separator("__"));
+        .add_source(File::new(".oatmeal", FileFormat::Toml).required(false))
+        .add_source(Environment::with_prefix("OATMEAL").separator("__"));
 
     let mut config: AppConfig = builder.build()?.try_deserialize()?;
-    if let Ok(v) = env::var("ABS_PAGE_AGENT__MODEL") {
+    if let Ok(v) = env::var("OATMEAL_PAGE_AGENT__MODEL") {
         if !v.is_empty() {
             config.page_agent.model = v;
         }
     }
-    if let Ok(v) = env::var("ABS_PAGE_AGENT__URL") {
+    if let Ok(v) = env::var("OATMEAL_PAGE_AGENT__URL") {
         if !v.is_empty() {
             config.page_agent.url = v;
         }
     }
-    if let Ok(v) = env::var("ABS_PAGE_AGENT__KEY") {
+    if let Ok(v) = env::var("OATMEAL_PAGE_AGENT__KEY") {
         if !v.is_empty() {
             config.page_agent.key = v;
         }

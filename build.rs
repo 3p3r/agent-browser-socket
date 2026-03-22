@@ -1,17 +1,17 @@
+use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fs;
-use std::io::Write;
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 const VERSION: &str = "v0.21.4";
-const SKILLS_REPO_TREE_URL: &str =
-    "https://api.github.com/repos/vercel-labs/agent-browser/git/trees/main?recursive=1";
-const SKILLS_BASE_RAW_URL: &str =
-    "https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser";
-const SKILLS_PREFIX: &str = "skills/agent-browser/";
+const SKILLS_ARCHIVE_URL: &str =
+    "https://github.com/vercel-labs/agent-browser/archive/refs/heads/main.tar.gz";
+const SKILLS_ARCHIVE_PREFIX: &str = "/skills/agent-browser/";
 
 fn main() {
     if let Err(error) = run() {
@@ -57,12 +57,15 @@ fn prepare_upstream_skills(out_dir: &Path) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(&skills_root)?;
 
     let client = reqwest::blocking::Client::builder()
-        .user_agent("agent-browser-server-build")
+        .user_agent("oatmeal-build")
         .build()?;
-    let mut discovered_files = discover_upstream_skill_files(&client)?;
+    let mut upstream_files = discover_upstream_skill_files(&client)?;
+    let mut discovered_files = upstream_files.keys().cloned().collect::<Vec<_>>();
 
     for relative_path in &discovered_files {
-        let source = fetch_upstream_skill_file(&client, relative_path)?;
+        let source = upstream_files
+            .remove(relative_path)
+            .ok_or_else(|| format!("missing discovered upstream skill file: {relative_path}"))?;
         let processed = process_upstream_skill_file(relative_path, source);
         let destination = skills_root.join(relative_path);
         if let Some(parent) = destination.parent() {
@@ -89,51 +92,39 @@ fn prepare_upstream_skills(out_dir: &Path) -> Result<(), Box<dyn Error>> {
 
 fn discover_upstream_skill_files(
     client: &reqwest::blocking::Client,
-) -> Result<Vec<String>, Box<dyn Error>> {
-    let response = client
-        .get(SKILLS_REPO_TREE_URL)
-        .send()?
-        .error_for_status()?;
-    let response_text = response.text()?;
-    let json: serde_json::Value = serde_json::from_str(&response_text)?;
-    let entries = json
-        .get("tree")
-        .and_then(|value| value.as_array())
-        .ok_or_else(|| "missing tree array in GitHub API response".to_string())?;
+) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+    let response = client.get(SKILLS_ARCHIVE_URL).send()?.error_for_status()?;
+    let bytes = response.bytes()?;
+    let decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    let mut files = BTreeMap::new();
 
-    let mut files = Vec::new();
-    for entry in entries {
-        let Some(kind) = entry.get("type").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        if kind != "blob" {
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
             continue;
         }
 
-        let Some(path) = entry.get("path").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        let Some(relative) = path.strip_prefix(SKILLS_PREFIX) else {
+        let path = entry.path()?.to_string_lossy().into_owned();
+        let Some(prefix_index) = path.find(SKILLS_ARCHIVE_PREFIX) else {
             continue;
         };
 
-        if relative.ends_with(".md") || relative.ends_with(".sh") {
-            files.push(relative.to_string());
+        let relative_path = path[prefix_index + SKILLS_ARCHIVE_PREFIX.len()..].to_string();
+        if !(relative_path.ends_with(".md") || relative_path.ends_with(".sh")) {
+            continue;
         }
+
+        let mut source = String::new();
+        entry.read_to_string(&mut source)?;
+        files.insert(relative_path, source);
     }
 
-    files.sort();
-    files.dedup();
-    Ok(files)
-}
+    if files.is_empty() {
+        return Err("agent-browser skills archive did not contain any .md or .sh files".into());
+    }
 
-fn fetch_upstream_skill_file(
-    client: &reqwest::blocking::Client,
-    relative_path: &str,
-) -> Result<String, Box<dyn Error>> {
-    let url = format!("{SKILLS_BASE_RAW_URL}/{relative_path}");
-    let response = client.get(url).send()?.error_for_status()?;
-    Ok(response.text()?)
+    Ok(files)
 }
 
 fn process_upstream_skill_file(relative_path: &str, source: String) -> String {
@@ -155,11 +146,11 @@ fn process_skill_md(source: String) -> String {
     let mut processed = source;
     processed = processed.replace(
         "allowed-tools: Bash(npx agent-browser:*), Bash(agent-browser:*)",
-        "allowed-tools: mcp__agent_browser__command",
+        "allowed-tools: mcp__oatmeal__shell_command",
     );
     processed = processed.replace(
         "The CLI uses Chrome/Chromium via CDP directly. Install via `npm i -g agent-browser`, `brew install agent-browser`, or `cargo install agent-browser`. Run `agent-browser install` to download Chrome. Run `agent-browser upgrade` to update to the latest version.",
-        "Use this skill through the MCP `command` tool in this server. Commands execute in a bash context where `agent-browser` is available. Execute scripts with full bash semantics (pipes, redirections, stdin): `echo \"pass\" | agent-browser auth save github --url https://github.com/login --username user --password-stdin`.",
+        "Use this skill through the MCP `shell_command` tool in this server. Commands execute in a bash context where `agent-browser` is available. Execute scripts with full bash semantics (pipes, redirections, stdin): `echo \"pass\" | agent-browser auth save github --url https://github.com/login --username user --password-stdin`.",
     );
 
     if !processed.contains("references/agentic-commands.md") {
@@ -304,7 +295,7 @@ fn mime_for_path(path: &str) -> &'static str {
 fn render_agentic_commands_reference() -> &'static str {
     r#"# Synthetic Agentic Commands
 
-This server supports two synthetic commands in the MCP `command` tool.
+This server supports two synthetic commands in the MCP `shell_command` tool.
 
 ## `agentic-open`
 

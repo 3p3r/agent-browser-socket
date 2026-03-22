@@ -11,7 +11,7 @@ const EMBEDDED_BINARY_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agen
 
 fn cached_binary_path() -> PathBuf {
     let cache_root = cache_dir().unwrap_or_else(std::env::temp_dir);
-    let app_dir = cache_root.join("agent-browser-server");
+    let app_dir = cache_root.join("oatmeal");
     let file_name = if cfg!(windows) {
         "agent-browser.exe"
     } else {

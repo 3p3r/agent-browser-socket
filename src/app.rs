@@ -6,7 +6,8 @@ use crate::page_agent_runtime::{run_page_agent_injection, run_page_agent_prompt}
 use crate::sandbox_files::prepare_sandbox_files;
 use crate::screenshot::capture_all_screenshots;
 use crate::server::{unregister_uri_scheme, URI_SCHEME};
-use clap::{ArgAction, CommandFactory, Parser};
+use clap::error::ErrorKind;
+use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use coolor::Hsl;
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -33,57 +34,96 @@ use url::Url;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "agent-browser-server",
+    name = "oatmeal",
+    about = "Single-binary MCP server with HTTP and stdio transports plus sandboxed browser shell execution",
+    long_about = "Oatmeal bundles MCP server transports, a sandboxed Bash execution environment, and an embedded agent-browser runtime into one binary.",
+    after_help = "Examples:\n  oatmeal --command \"agent-browser open https://example.com\"\n  oatmeal --verbose --sandbox-output ./out --command \"name=world && echo hello-\\$name > /report.txt\"",
     disable_help_subcommand = true,
     disable_version_flag = true
 )]
 struct CliArgs {
-    #[arg(long, action = ArgAction::SetTrue)]
-    mcp: bool,
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(
+        long,
+        value_enum,
+        num_args = 0..=1,
+        default_missing_value = "sse",
+        help = "Run MCP mode with the selected transport; bare --mcp defaults to sse"
+    )]
+    mcp: Option<McpProtocol>,
+    #[arg(long, action = ArgAction::SetTrue, help = "Register the oatmeal:// URI scheme with the OS")]
     register_uri: bool,
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, help = "Remove the oatmeal:// URI scheme registration")]
     unregister_uri: bool,
-    #[arg(long, short = 'V', action = ArgAction::SetTrue)]
+    #[arg(long, short = 'V', action = ArgAction::SetTrue, help = "Print the oatmeal version")]
     version: bool,
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, help = "Delete the cached embedded browser binary")]
     clean: bool,
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, help = "Capture screenshots from all system monitors")]
     screenshot: bool,
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, help = "Print forwarded browser stdout and stderr")]
     verbose: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        num_args = 1..,
+        allow_hyphen_values = true,
+        help = "Execute the CLI equivalent of the MCP shell_command tool"
+    )]
+    command: Option<Vec<OsString>>,
+    #[arg(
+        long,
+        help = "Export detected sandbox files into this directory after --command completes"
+    )]
     sandbox_output: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Apply additional gitignore-style filters when exporting sandbox files"
+    )]
     sandbox_ignore: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, help = "Override the page-agent model name")]
     page_agent_model: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Override the page-agent API base URL")]
     page_agent_url: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Override the page-agent API key or bearer token")]
     page_agent_key: Option<String>,
-    #[arg()]
+    #[arg(help = "Optional oatmeal:// URI to launch, or a positional alias such as version")]
     input: Option<OsString>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum McpProtocol {
+    #[value(help = "Run MCP over stdin/stdout using JSON-RPC")]
+    Stdio,
+    #[value(help = "Run MCP over the HTTP server endpoint at /mcp")]
+    Sse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliMode {
     Serve,
     UriLaunch(String),
+    Help(String),
+    InvalidArgs(String),
     RegisterUri,
     UnregisterUri,
     Version,
     Clean,
     Screenshot,
-    Mcp,
+    Mcp(McpProtocol),
     Command(Vec<String>),
 }
 
-fn parse_cli_args(args: &[OsString]) -> Result<CliArgs, String> {
-    let argv = std::iter::once(OsString::from("agent-browser-server")).chain(args.iter().cloned());
+struct CliParseError {
+    kind: ErrorKind,
+    message: String,
+}
+
+fn parse_cli_args(args: &[OsString]) -> Result<CliArgs, CliParseError> {
+    let argv = std::iter::once(OsString::from("oatmeal")).chain(args.iter().cloned());
     CliArgs::try_parse_from(argv).map_err(|error| {
+        let kind = error.kind().clone();
         let mut command = CliArgs::command();
-        error.format(&mut command).to_string()
+        let message = error.format(&mut command).to_string();
+        CliParseError { kind, message }
     })
 }
 
@@ -101,69 +141,63 @@ pub struct CliFlags {
     pub page_agent_key: Option<String>,
 }
 
-fn split_at_command_flag(args: &[OsString]) -> (&[OsString], Option<Vec<String>>) {
-    let command_flag = OsString::from("--command");
-    match args.iter().position(|arg| arg == &command_flag) {
-        Some(index) => (
-            &args[..index],
-            Some(
-                args[index + 1..]
-                    .iter()
-                    .map(|a| a.to_string_lossy().to_string())
-                    .collect(),
-            ),
-        ),
-        None => (args, None),
-    }
-}
-
 pub fn parse_cli(args: &[OsString]) -> ParsedCli {
-    let (flags, forwarded) = split_at_command_flag(args);
-    let parsed = parse_cli_args(flags).ok();
+    let parsed = parse_cli_args(args);
 
-    let mode = if let Some(forwarded_args) = forwarded {
-        CliMode::Command(forwarded_args)
-    } else if let Some(ref p) = parsed {
-        if p.mcp {
-            CliMode::Mcp
-        } else if p.register_uri {
-            CliMode::RegisterUri
-        } else if p.unregister_uri {
-            CliMode::UnregisterUri
-        } else if p.clean {
-            CliMode::Clean
-        } else if p.screenshot {
-            CliMode::Screenshot
-        } else if p.version
-            || p.input
-                .as_ref()
-                .map(|value| value.to_string_lossy() == "version")
-                .unwrap_or(false)
-        {
-            CliMode::Version
-        } else if let Some(ref input) = p.input {
-            let candidate = input.to_string_lossy();
-            if candidate.contains("://") {
-                CliMode::UriLaunch(candidate.to_string())
+    let mode = match &parsed {
+        Ok(p) => {
+            if let Some(command) = p.command.as_ref() {
+                CliMode::Command(
+                    command
+                        .iter()
+                        .map(|value| value.to_string_lossy().to_string())
+                        .collect(),
+                )
+            } else if let Some(protocol) = p.mcp {
+                CliMode::Mcp(protocol)
+            } else if p.register_uri {
+                CliMode::RegisterUri
+            } else if p.unregister_uri {
+                CliMode::UnregisterUri
+            } else if p.clean {
+                CliMode::Clean
+            } else if p.screenshot {
+                CliMode::Screenshot
+            } else if p.version
+                || p.input
+                    .as_ref()
+                    .map(|value| value.to_string_lossy() == "version")
+                    .unwrap_or(false)
+            {
+                CliMode::Version
+            } else if let Some(ref input) = p.input {
+                let candidate = input.to_string_lossy();
+                if candidate.contains("://") {
+                    CliMode::UriLaunch(candidate.to_string())
+                } else {
+                    CliMode::Serve
+                }
             } else {
                 CliMode::Serve
             }
-        } else {
-            CliMode::Serve
         }
-    } else {
-        CliMode::Serve
+        Err(error) if error.kind == ErrorKind::DisplayHelp => CliMode::Help(error.message.clone()),
+        Err(error) => CliMode::InvalidArgs(error.message.clone()),
     };
+
+    let parsed_ref = parsed.as_ref().ok();
 
     ParsedCli {
         mode,
         flags: CliFlags {
-            verbose: parsed.as_ref().map(|p| p.verbose).unwrap_or(false),
-            sandbox_output: parsed.as_ref().and_then(|p| p.sandbox_output.clone()),
-            sandbox_ignore: parsed.as_ref().and_then(|p| p.sandbox_ignore.clone()),
-            page_agent_model: parsed.as_ref().and_then(|p| p.page_agent_model.clone()),
-            page_agent_url: parsed.as_ref().and_then(|p| p.page_agent_url.clone()),
-            page_agent_key: parsed.as_ref().and_then(|p| p.page_agent_key.clone()),
+            verbose: parsed_ref
+                .map(|p| p.verbose || p.command.is_some())
+                .unwrap_or(false),
+            sandbox_output: parsed_ref.and_then(|p| p.sandbox_output.clone()),
+            sandbox_ignore: parsed_ref.and_then(|p| p.sandbox_ignore.clone()),
+            page_agent_model: parsed_ref.and_then(|p| p.page_agent_model.clone()),
+            page_agent_url: parsed_ref.and_then(|p| p.page_agent_url.clone()),
+            page_agent_key: parsed_ref.and_then(|p| p.page_agent_key.clone()),
         },
     }
 }
@@ -184,7 +218,7 @@ pub fn build_page_agent_config(app_config: &AppConfig, flags: &CliFlags) -> Page
 
 fn register_uri_scheme() -> Result<(), Box<dyn Error>> {
     let executable = std::env::current_exe()?;
-    let uri_scheme = UriScheme::new(URI_SCHEME.unsecure(), "Agent Browser Server", executable);
+    let uri_scheme = UriScheme::new(URI_SCHEME.unsecure(), "Oatmeal", executable);
     sysuri::register(&uri_scheme)?;
     Ok(())
 }
@@ -231,7 +265,7 @@ impl IdleAnimationGuard {
         detected_browser_path: Option<String>,
         quit_tx: Option<tokio_mpsc::Sender<()>>,
     ) -> Option<Self> {
-        let tui_disabled = std::env::var("ABS_DISABLE_TUI")
+        let tui_disabled = std::env::var("OATMEAL_DISABLE_TUI")
             .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or(false);
         if tui_disabled {
@@ -359,7 +393,7 @@ fn run_idle_animation_loop(
         let elapsed = start.elapsed();
         let spinner_index = ((elapsed.as_millis() / 140) as usize) % spinner.len();
 
-        let title = format!(" agent-browser-server {} ", spinner[spinner_index]);
+        let title = format!(" oatmeal {} ", spinner[spinner_index]);
         let subtitle = format!("Listening on {host}:{port}");
         let uptime = format!("uptime {}s", elapsed.as_secs());
 
@@ -402,8 +436,7 @@ fn run_idle_animation_loop(
                 status_lines.push(Line::from(""));
                 let detected_line = match &detected_browser_path {
                     Some(path) => format!("browser: {path}"),
-                    None => "browser: not found (run `agent-browser-server --command install`)"
-                        .to_string(),
+                    None => "browser: not found (run `oatmeal --command install`)".to_string(),
                 };
                 status_lines.push(Line::from(Span::styled(
                     detected_line,
@@ -499,6 +532,14 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
     let cli = parse_cli(&args);
 
     match cli.mode {
+        CliMode::Help(output) => {
+            print!("{output}");
+            Ok(0)
+        }
+        CliMode::InvalidArgs(output) => {
+            eprint!("{output}");
+            Ok(2)
+        }
         CliMode::RegisterUri => {
             register_uri_scheme()?;
             println!("registered {}:// URI scheme", URI_SCHEME.unsecure());
@@ -536,7 +577,7 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             Ok(exit_code)
         }
         CliMode::Version => {
-            println!("agent-browser-server {}", env!("CARGO_PKG_VERSION"));
+            println!("oatmeal {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
         CliMode::Clean => {
@@ -553,10 +594,16 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             println!("{}", serde_json::to_string(&screenshots)?);
             Ok(0)
         }
-        CliMode::Mcp => {
+        CliMode::Mcp(McpProtocol::Stdio) => {
             let config = load_config()?;
             let page_agent_config = build_page_agent_config(&config, &cli.flags);
             crate::mcp::run_mcp_stdio(config, page_agent_config).await
+        }
+        CliMode::Mcp(McpProtocol::Sse) => {
+            let config = load_config()?;
+            let page_agent_config = build_page_agent_config(&config, &cli.flags);
+            run_http_server_mode(config, page_agent_config).await?;
+            Ok(0)
         }
         CliMode::UriLaunch(uri) => {
             ensure_uri_scheme_registered()?;
@@ -583,28 +630,35 @@ pub async fn run_with_args(args: Vec<OsString>) -> Result<i32, Box<dyn Error>> {
             Ok(0)
         }
         CliMode::Serve => {
-            ensure_uri_scheme_registered()?;
             let config = load_config()?;
             let page_agent_config = build_page_agent_config(&config, &cli.flags);
-
-            let (quit_tx, mut quit_rx) = tokio_mpsc::channel::<()>(1);
-            let shutdown = async move {
-                tokio::select! {
-                    _ = shutdown_signal() => {}
-                    _ = quit_rx.recv() => {}
-                }
-            };
-
-            run_mcp_streamable_http_with_shutdown_internal(
-                config,
-                page_agent_config,
-                shutdown,
-                Some(quit_tx),
-            )
-            .await?;
+            run_http_server_mode(config, page_agent_config).await?;
             Ok(0)
         }
     }
+}
+
+async fn run_http_server_mode(
+    config: AppConfig,
+    page_agent_config: PageAgentConfig,
+) -> Result<(), Box<dyn Error>> {
+    ensure_uri_scheme_registered()?;
+
+    let (quit_tx, mut quit_rx) = tokio_mpsc::channel::<()>(1);
+    let shutdown = async move {
+        tokio::select! {
+            _ = shutdown_signal() => {}
+            _ = quit_rx.recv() => {}
+        }
+    };
+
+    run_mcp_streamable_http_with_shutdown_internal(
+        config,
+        page_agent_config,
+        shutdown,
+        Some(quit_tx),
+    )
+    .await
 }
 
 pub async fn run_command_passthrough(
@@ -740,10 +794,7 @@ where
         quit_tx,
     );
     if animation.is_none() {
-        println!(
-            "agent-browser-server listening on {}:{}",
-            config.host, config.port
-        );
+        println!("oatmeal listening on {}:{}", config.host, config.port);
     }
 
     let serve_result =
@@ -788,10 +839,10 @@ mod tests {
 
     static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-    fn clear_abs_env() {
+    fn clear_oatmeal_env() {
         let keys: Vec<String> = std::env::vars()
             .filter_map(|(key, _)| {
-                if key.starts_with("ABS_") {
+                if key.starts_with("OATMEAL_") {
                     Some(key)
                 } else {
                     None
@@ -837,7 +888,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("abs-{name}-{unique}"));
+        let dir = std::env::temp_dir().join(format!("oatmeal-{name}-{unique}"));
         std::fs::create_dir_all(&dir).expect("create temp test dir");
         dir
     }
@@ -857,6 +908,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_cli_recognizes_help_and_does_not_fall_through_to_serve() {
+        match parse_cli(&[OsString::from("--help")]).mode {
+            CliMode::Help(output) => {
+                assert!(output.contains("Usage:"), "output={output}");
+                assert!(output.contains("--mcp"), "output={output}");
+                assert!(output.contains("--command <COMMAND>..."), "output={output}");
+            }
+            other => panic!("expected help mode, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_cli_recognizes_version_aliases() {
         assert_eq!(
             parse_cli(&[OsString::from("--version")]).mode,
@@ -872,7 +935,18 @@ mod tests {
             parse_cli(&[OsString::from("--screenshot")]).mode,
             CliMode::Screenshot
         );
-        assert_eq!(parse_cli(&[OsString::from("--mcp")]).mode, CliMode::Mcp);
+        assert_eq!(
+            parse_cli(&[OsString::from("--mcp")]).mode,
+            CliMode::Mcp(McpProtocol::Sse)
+        );
+        assert_eq!(
+            parse_cli(&[OsString::from("--mcp"), OsString::from("stdio")]).mode,
+            CliMode::Mcp(McpProtocol::Stdio)
+        );
+        assert_eq!(
+            parse_cli(&[OsString::from("--mcp=sse")]).mode,
+            CliMode::Mcp(McpProtocol::Sse)
+        );
         assert_eq!(
             parse_cli(&[OsString::from("--register-uri")]).mode,
             CliMode::RegisterUri
@@ -882,8 +956,8 @@ mod tests {
             CliMode::UnregisterUri
         );
         assert_eq!(
-            parse_cli(&[OsString::from("abs://open?port=9876")]).mode,
-            CliMode::UriLaunch("abs://open?port=9876".to_string())
+            parse_cli(&[OsString::from("oatmeal://open?port=9876")]).mode,
+            CliMode::UriLaunch("oatmeal://open?port=9876".to_string())
         );
         assert_eq!(parse_cli(&[OsString::from("serve")]).mode, CliMode::Serve);
     }
@@ -945,6 +1019,11 @@ mod tests {
         assert!(!parse_cli(&[]).flags.verbose);
         assert!(parse_cli(&[OsString::from("--verbose")]).flags.verbose);
         assert!(
+            parse_cli(&[OsString::from("--command"), OsString::from("open")])
+                .flags
+                .verbose
+        );
+        assert!(
             parse_cli(&[
                 OsString::from("--verbose"),
                 OsString::from("--command"),
@@ -960,7 +1039,7 @@ mod tests {
     fn parse_cli_sandbox_output_reads_flag_before_command() {
         let cli = parse_cli(&[
             OsString::from("--sandbox-output"),
-            OsString::from("/tmp/abs-sandbox"),
+            OsString::from("/tmp/oatmeal-sandbox"),
             OsString::from("--command"),
             OsString::from("echo"),
             OsString::from("hello"),
@@ -968,7 +1047,7 @@ mod tests {
 
         assert_eq!(
             cli.flags.sandbox_output,
-            Some(PathBuf::from("/tmp/abs-sandbox"))
+            Some(PathBuf::from("/tmp/oatmeal-sandbox"))
         );
     }
 
@@ -976,7 +1055,7 @@ mod tests {
     fn parse_cli_sandbox_ignore_reads_flag_before_command() {
         let cli = parse_cli(&[
             OsString::from("--sandbox-ignore"),
-            OsString::from("/tmp/abs-ignore"),
+            OsString::from("/tmp/oatmeal-ignore"),
             OsString::from("--command"),
             OsString::from("echo"),
             OsString::from("hello"),
@@ -984,7 +1063,7 @@ mod tests {
 
         assert_eq!(
             cli.flags.sandbox_ignore,
-            Some(PathBuf::from("/tmp/abs-ignore"))
+            Some(PathBuf::from("/tmp/oatmeal-ignore"))
         );
     }
 
@@ -998,16 +1077,16 @@ mod tests {
             page_agent: PageAgentConfig::default(),
         };
 
-        apply_uri_overrides(&mut config, "abs://open?port=7777").expect("port override");
+        apply_uri_overrides(&mut config, "oatmeal://open?port=7777").expect("port override");
         assert_eq!(config.port, 7777);
         assert_eq!(config.host, "0.0.0.0");
 
-        apply_uri_overrides(&mut config, "abs://open?port=8888&host=127.0.0.1")
+        apply_uri_overrides(&mut config, "oatmeal://open?port=8888&host=127.0.0.1")
             .expect("full override");
         assert_eq!(config.port, 8888);
         assert_eq!(config.host, "127.0.0.1");
 
-        apply_uri_overrides(&mut config, "abs://localhost").expect("no host query override");
+        apply_uri_overrides(&mut config, "oatmeal://localhost").expect("no host query override");
         assert_eq!(config.port, 8888);
         assert_eq!(config.host, "127.0.0.1");
     }
@@ -1034,7 +1113,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        clear_abs_env();
+        clear_oatmeal_env();
 
         let home = create_temp_test_dir("app-home-passthrough");
         let cwd = create_temp_test_dir("app-cwd-passthrough");
@@ -1059,7 +1138,7 @@ mod tests {
             std::env::remove_var("HOME");
         }
 
-        clear_abs_env();
+        clear_oatmeal_env();
     }
 
     #[tokio::test]
@@ -1068,7 +1147,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        clear_abs_env();
+        clear_oatmeal_env();
 
         let artifact_dir = reset_test_artifact_dir("run_with_args_command_exports_sandbox_files");
         let home = create_temp_test_dir("app-home-export");
@@ -1099,7 +1178,7 @@ mod tests {
             std::env::remove_var("HOME");
         }
 
-        clear_abs_env();
+        clear_oatmeal_env();
     }
 
     #[tokio::test]
@@ -1108,7 +1187,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        clear_abs_env();
+        clear_oatmeal_env();
 
         let artifact_dir = reset_test_artifact_dir("run_with_args_supports_basic_shell_commands");
         let home = create_temp_test_dir("app-home-shell-basic");
@@ -1139,7 +1218,7 @@ mod tests {
             std::env::remove_var("HOME");
         }
 
-        clear_abs_env();
+        clear_oatmeal_env();
     }
 
     #[tokio::test]
@@ -1148,7 +1227,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        clear_abs_env();
+        clear_oatmeal_env();
 
         let artifact_dir = reset_test_artifact_dir("run_with_args_applies_sandbox_ignore_filters");
         let home = create_temp_test_dir("app-home-ignore");
@@ -1186,7 +1265,7 @@ mod tests {
             std::env::remove_var("HOME");
         }
 
-        clear_abs_env();
+        clear_oatmeal_env();
     }
 
     #[tokio::test]
