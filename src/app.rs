@@ -1287,6 +1287,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_with_args_supports_python_command_mode() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        clear_oatmeal_env();
+
+        let artifact_dir = reset_test_artifact_dir("run_with_args_supports_python_command_mode");
+        let home = create_temp_test_dir("app-home-python");
+        let cwd = create_temp_test_dir("app-cwd-python");
+        let sandbox_output = artifact_dir.join("sandbox-output");
+
+        let original_home: Option<OsString> = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let _cwd_guard = DirGuard::enter(&cwd);
+
+        let result = run_with_args(vec![
+            OsString::from("--sandbox-output"),
+            sandbox_output.as_os_str().to_os_string(),
+            OsString::from("--command"),
+            OsString::from(
+                "python3 -c \"from pathlib import Path; _ = Path('/report.txt').write_text('hello from python\\n')\"",
+            ),
+        ])
+        .await
+        .expect("run python command");
+
+        assert_eq!(result, 0);
+        let exported_file = sandbox_output.join("report.txt");
+        let exported_data = std::fs::read_to_string(exported_file).expect("read exported file");
+        assert_eq!(exported_data, "hello from python\n");
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        clear_oatmeal_env();
+    }
+
+    #[tokio::test]
     async fn run_with_args_applies_sandbox_ignore_filters() {
         let _guard = ENV_LOCK
             .lock()

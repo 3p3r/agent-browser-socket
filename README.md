@@ -136,7 +136,25 @@ Examples:
 ./oatmeal-* --command "ab open https://example.com"
 ./oatmeal-* --command "ab --headed open https://example.com"
 ./oatmeal-* --command "name=world && echo hello-$name > /report.txt"
+./oatmeal-* --command "python3 -c \"print(2 ** 10)\""
 ```
+
+Embedded `python3` is also available inside command mode through Bashkit's experimental Monty runtime. It runs in-memory against the same virtual filesystem used by the shell.
+
+Examples:
+
+```bash
+./oatmeal-* --command "echo important > /shared.txt && python3 -c \"from pathlib import Path; print(Path('/shared.txt').read_text().strip())\""
+./oatmeal-* --sandbox-output ./output --command "python3 -c \"from pathlib import Path; _ = Path('/report.txt').write_text('hello from python\\n')\""
+```
+
+Python limitations match Bashkit's embedded runtime:
+
+- use `pathlib.Path` instead of `open()`
+- no network access, subprocesses, or host filesystem access
+- no third-party packages such as `numpy` or `requests`
+- no class definitions
+- prefer f-strings over `str.format()`
 
 Synthetic browser helpers are also supported:
 

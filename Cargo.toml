@@ -25,7 +25,7 @@ tracing = "0.1"
 url = "2"
 xcap = "0.4.1"
 base64 = "0.22"
-bashkit = "0.1.12"
+bashkit = { git = "https://github.com/everruns/bashkit", rev = "3c4c6ae8621ef3c3c9c4aba413f2db87d4955987", features = ["python"] }
 clap = { version = "4", features = ["derive"] }
 ftmi = "0.2"
 ignore = "0.4"

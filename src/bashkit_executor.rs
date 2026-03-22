@@ -186,7 +186,7 @@ impl BashkitExecutor {
             .filter(|p| p.exists())
             .collect();
 
-        let mut builder = Bash::builder().builtin(
+        let mut builder = Bash::builder().python().builtin(
             "agent-browser",
             Box::new(AgentBrowserBuiltin {
                 binary_path: self.binary_path.clone(),
@@ -544,6 +544,36 @@ mod tests {
             .find(|file| file.path == PathBuf::from("/shell.txt"))
             .expect("shell output file");
         assert_eq!(output.data, b"saved-world\n");
+        assert_eq!(output.origin, SandboxFileOrigin::Sandbox);
+    }
+
+    #[tokio::test]
+    async fn execute_supports_inline_python() {
+        let executor = BashkitExecutor::new(PathBuf::from("agent-browser"));
+        let command = prepare_command("python3 -c \"print(2 ** 10)\"").unwrap();
+        let result = executor.execute(&command, None).await;
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "1024\n");
+    }
+
+    #[tokio::test]
+    async fn execute_supports_python_vfs_round_trip() {
+        let executor = BashkitExecutor::new(PathBuf::from("agent-browser"));
+        let command = prepare_command(
+            "echo important > /shared.txt && python3 -c \"from pathlib import Path; content = Path('/shared.txt').read_text().strip(); _ = Path('/result.txt').write_text(f'value={content}\\n')\"",
+        )
+        .unwrap();
+        let result = executor.execute(&command, None).await;
+
+        assert_eq!(result.exit_code, 0);
+
+        let output = result
+            .files
+            .iter()
+            .find(|file| file.path == PathBuf::from("/result.txt"))
+            .expect("python output file");
+        assert_eq!(output.data, b"value=important\n");
         assert_eq!(output.origin, SandboxFileOrigin::Sandbox);
     }
 
