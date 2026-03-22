@@ -64,7 +64,7 @@ struct CliArgs {
     verbose: bool,
     #[arg(
         long,
-        num_args = 1..,
+        num_args = 0..,
         allow_hyphen_values = true,
         help = "Execute the CLI equivalent of the MCP shell_command tool"
     )]
@@ -913,7 +913,10 @@ mod tests {
             CliMode::Help(output) => {
                 assert!(output.contains("Usage:"), "output={output}");
                 assert!(output.contains("--mcp"), "output={output}");
-                assert!(output.contains("--command <COMMAND>..."), "output={output}");
+                assert!(
+                    output.contains("--command [<COMMAND>...]"),
+                    "output={output}"
+                );
             }
             other => panic!("expected help mode, got {other:?}"),
         }

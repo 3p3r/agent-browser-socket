@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn applies_custom_ignore_file() {
         let root = std::env::temp_dir().join(format!(
-            "abs-sandbox-files-{}",
+            "oatmeal-sandbox-files-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

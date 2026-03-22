@@ -48,7 +48,7 @@ pub async fn run_page_agent_injection(
 
     let init = run_eval_script(
         binary_path,
-        "window.__absPageAgentChunks = [];".to_string(),
+        "window.__oatmealPageAgentChunks = [];".to_string(),
         command_env,
     )
     .await?;
@@ -69,7 +69,7 @@ pub async fn run_page_agent_injection(
 
         let chunk = &bundle[chunk_start..chunk_end];
         let serialized_chunk = serde_json::to_string(chunk).unwrap_or_else(|_| "\"\"".to_string());
-        let append_script = format!("window.__absPageAgentChunks.push({serialized_chunk});");
+        let append_script = format!("window.__oatmealPageAgentChunks.push({serialized_chunk});");
 
         let append = run_eval_script(binary_path, append_script, command_env).await?;
         if append.exit_code != 0 {
@@ -81,8 +81,8 @@ pub async fn run_page_agent_injection(
 
     let finalize_script = r#"(() => {
     if (window.PageAgent) return 'already_loaded';
-    const source = (window.__absPageAgentChunks || []).join('');
-    delete window.__absPageAgentChunks;
+    const source = (window.__oatmealPageAgentChunks || []).join('');
+    delete window.__oatmealPageAgentChunks;
     (0, eval)(source);
     if (!window.PageAgent) throw new Error('PageAgent not found on window after eval');
     return 'loaded';

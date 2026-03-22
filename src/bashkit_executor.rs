@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn collect_real_files_skips_pre_existing() {
         let tmp = std::env::temp_dir().join(format!(
-            "abs-real-{}",
+            "oatmeal-real-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

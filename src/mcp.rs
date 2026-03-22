@@ -559,11 +559,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let output_dir = std::env::temp_dir().join(format!("abs-mcp-command-ignore-{unique}"));
+        let output_dir = std::env::temp_dir().join(format!("oatmeal-mcp-command-ignore-{unique}"));
         std::fs::create_dir_all(&output_dir).expect("create output dir");
 
-        let keep_path = std::env::temp_dir().join(format!("abs-mcp-keep-{unique}.txt"));
-        let noisy_path = std::env::temp_dir().join(format!("abs-mcp-trace-{unique}.log"));
+        let keep_path = std::env::temp_dir().join(format!("oatmeal-mcp-keep-{unique}.txt"));
+        let noisy_path = std::env::temp_dir().join(format!("oatmeal-mcp-trace-{unique}.log"));
         let ignore_path = output_dir.join("sandbox.ignore");
         std::fs::write(&ignore_path, "*.log\n").expect("write ignore file");
 
@@ -589,7 +589,10 @@ mod tests {
             serialized.contains("resources_created"),
             "result={serialized}"
         );
-        assert!(serialized.contains("abs-mcp-keep-"), "result={serialized}");
+        assert!(
+            serialized.contains("oatmeal-mcp-keep-"),
+            "result={serialized}"
+        );
         assert!(!serialized.contains("trace.log"), "result={serialized}");
 
         let store = resource_store.read().await;
@@ -597,7 +600,7 @@ mod tests {
 
         let (uri, entry) = store.iter().next().expect("resource entry");
         assert!(uri.starts_with("resource://file/"), "uri={uri}");
-        assert_eq!(entry.name, format!("tmp/abs-mcp-keep-{unique}.txt"));
+        assert_eq!(entry.name, format!("tmp/oatmeal-mcp-keep-{unique}.txt"));
         assert_eq!(entry.source_path, keep_path.display().to_string());
         assert_eq!(entry.mime_type, "text/plain");
 
@@ -621,7 +624,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let shell_path = std::env::temp_dir().join(format!("abs-mcp-shell-{unique}.txt"));
+        let shell_path = std::env::temp_dir().join(format!("oatmeal-mcp-shell-{unique}.txt"));
         let command = format!(
             "name=world && echo hello-$name | cat && echo saved-$name > {} && cat {}",
             shell_path.display(),
@@ -652,7 +655,7 @@ mod tests {
         assert_eq!(store.len(), 1);
 
         let (_, entry) = store.iter().next().expect("resource entry");
-        assert_eq!(entry.name, format!("tmp/abs-mcp-shell-{unique}.txt"));
+        assert_eq!(entry.name, format!("tmp/oatmeal-mcp-shell-{unique}.txt"));
         assert_eq!(entry.source_path, shell_path.display().to_string());
 
         drop(store);

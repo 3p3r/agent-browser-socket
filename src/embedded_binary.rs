@@ -3,11 +3,13 @@ use flate2::read::GzDecoder;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 const EMBEDDED_BINARY_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/agent-browser-bin.gz"));
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn cached_binary_path() -> PathBuf {
     let cache_root = cache_dir().unwrap_or_else(std::env::temp_dir);
@@ -42,7 +44,16 @@ pub fn resolve_binary_path(browser_override: Option<&str>) -> Result<PathBuf, st
     };
 
     if needs_write {
-        fs::write(&binary_path, embedded_binary)?;
+        let temp_id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_path = binary_path.with_extension(format!("tmp-{}-{temp_id}", std::process::id()));
+        fs::write(&temp_path, embedded_binary)?;
+        match fs::rename(&temp_path, &binary_path) {
+            Ok(()) => {}
+            Err(rename_error) => {
+                let _ = fs::remove_file(&temp_path);
+                return Err(rename_error);
+            }
+        }
     }
 
     #[cfg(unix)]
