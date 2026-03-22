@@ -2,6 +2,8 @@
 
 Oatmeal is a single binary that gives you an MCP server, a browser automation command surface, and a shell-style command mode for scripted workflows.
 
+<img src="./logo.png" alt="Oatmeal Logo" width="200"/>
+
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Running Oatmeal](#running-oatmeal)
