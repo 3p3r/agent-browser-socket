@@ -17,7 +17,7 @@ pub fn oatmeal_version_payload() -> Value {
 }
 
 pub fn oatmeal_cache_dir() -> std::path::PathBuf {
-    cache_root_dir()
+    cache_root_dir().join("oatmeal")
 }
 
 pub fn oatmeal_cache_dir_text() -> String {

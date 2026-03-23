@@ -5,6 +5,7 @@ mod command_args;
 mod command_runtime;
 mod configuration;
 mod embedded_binary;
+mod logging;
 mod mcp;
 mod page_agent_runtime;
 mod runtime_shared;
