@@ -597,7 +597,8 @@ mod tests {
         let result = executor.execute(&command, None).await;
 
         assert_eq!(result.exit_code, 0);
-        assert_eq!(result.stdout, "screenshot /tmp/out.png\n");
+        let expected_path = std::env::temp_dir().join("tmp/out.png");
+        assert_eq!(result.stdout, format!("screenshot {}\n", expected_path.display()));
 
         std::fs::remove_dir_all(&tmp).ok();
     }

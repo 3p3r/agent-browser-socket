@@ -181,7 +181,7 @@ async fn child_file_logging_captures_existing_mcp_listen_log_call_site_async(
     tokio::spawn(async move {
         let _ = mcp::run_mcp_streamable_http(config, page_agent_config, async move {
             let _ = shutdown_rx.await;
-        })
+        }, None)
         .await;
     });
 

@@ -10,6 +10,8 @@ mod command_runtime;
 mod configuration;
 #[path = "../src/embedded_binary.rs"]
 mod embedded_binary;
+#[path = "../src/app.rs"]
+mod app;
 #[path = "../src/mcp.rs"]
 mod mcp;
 #[path = "../src/page_agent_runtime.rs"]
@@ -30,15 +32,16 @@ use tokio::sync::oneshot;
 
 fn touch_imported_symbols() {
     let config = configuration::AppConfig::default();
-    let _ = (&config.auth_url, &config.page_agent);
+    let _ = &config.page_agent;
     let _ = configuration::load_config;
     let _ = embedded_binary::clean_cached_binary;
-    let _ = mcp::run_mcp_stdio;
     let _ = runtime_shared::oatmeal_version;
     let _ = runtime_shared::oatmeal_version_text;
     let _ = runtime_shared::oatmeal_version_payload;
     let _ = runtime_shared::capture_system_screenshots;
-    let _ = command_runtime::CommandExecutionMode::Cli;
+    let _ = command_runtime::CommandExecutionMode::Mcp {
+        cache_root: std::path::PathBuf::new(),
+    };
     let _ = &server::URI_SCHEME;
     let _ = server::unregister_uri_scheme;
 }
@@ -66,7 +69,7 @@ async fn start_mcp_streamable_http_server() -> (String, oneshot::Sender<()>) {
     tokio::spawn(async move {
         let _ = mcp::run_mcp_streamable_http(config, page_agent_config, async move {
             let _ = shutdown_rx.await;
-        })
+        }, None)
         .await;
     });
 
