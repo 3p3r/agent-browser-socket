@@ -186,6 +186,64 @@ fn apply_uri_overrides(config: &mut configuration::AppConfig, uri: &str) -> Resu
     Ok(())
 }
 
+fn maybe_handle_cli_passthrough() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if let Some(command_index) = args.iter().position(|arg| arg == "--command") {
+        let command = args.get(command_index + 1..).unwrap_or(&[]);
+        if command.is_empty() {
+            eprintln!("oatmeal: --command requires a command payload");
+            return Some(2);
+        }
+
+        let executable = &command[0];
+        let command_args = &command[1..];
+        if executable != "agent-browser" && executable != "ab" {
+            eprintln!("oatmeal: --command currently supports agent-browser/ab passthrough only");
+            return Some(2);
+        }
+
+        let binary_path = match embedded_binary::resolve_binary_path(None) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("oatmeal: failed to resolve embedded browser binary: {error}");
+                return Some(1);
+            }
+        };
+
+        let output = match std::process::Command::new(binary_path)
+            .args(command_args)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("oatmeal: failed to execute embedded browser binary: {error}");
+                return Some(1);
+            }
+        };
+
+        if !output.stdout.is_empty() {
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+        if !output.stderr.is_empty() {
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        return Some(output.status.code().unwrap_or(1));
+    }
+
+    let is_version_only = !args.is_empty()
+        && args
+            .iter()
+            .all(|arg| arg == "--version" || arg == "-V" || arg == "version");
+    if is_version_only {
+        println!("{}", runtime_shared::oatmeal_version_text());
+        return Some(0);
+    }
+
+    None
+}
+
 struct WinitTrayApp {
     proxy: EventLoopProxy<TrayLoopEvent>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -272,9 +330,8 @@ impl ApplicationHandler<TrayLoopEvent> for WinitTrayApp {
 }
 
 fn main() {
-    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
-        println!("{}", runtime_shared::oatmeal_version_text());
-        return;
+    if let Some(code) = maybe_handle_cli_passthrough() {
+        std::process::exit(code);
     }
 
     let _log_handle = match logging::init_file_logging() {
