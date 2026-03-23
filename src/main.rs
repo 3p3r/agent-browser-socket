@@ -15,28 +15,52 @@ mod server;
 
 static LOGO_PNG: &[u8] = include_bytes!("../logo.png");
 
-fn load_tray_icon() -> tray_icon::Icon {
+fn load_tray_icon() -> Result<tray_icon::Icon, String> {
     let img = image::load_from_memory(LOGO_PNG)
-        .expect("logo.png embedded bytes are invalid")
+        .map_err(|error| format!("logo.png embedded bytes are invalid: {error}"))?
         .into_rgba8();
     let (width, height) = img.dimensions();
-    tray_icon::Icon::from_rgba(img.into_raw(), width, height).expect("Icon::from_rgba failed")
+    tray_icon::Icon::from_rgba(img.into_raw(), width, height)
+        .map_err(|error| format!("Icon::from_rgba failed: {error}"))
 }
 
 fn main() {
-    let config = configuration::load_config().expect("config load failed");
+    let _log_handle = match logging::init_file_logging() {
+        Ok(handle) => handle,
+        Err(error) => {
+            eprintln!("Failed to initialize file logging: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    let config = match configuration::load_config() {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(target: "oatmeal::startup", "config load failed: {error}");
+            std::process::exit(1);
+        }
+    };
     let page_agent_config = config.page_agent.clone();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
-    let bg_thread = std::thread::Builder::new()
+    let bg_thread = match std::thread::Builder::new()
         .name("oatmeal-rt".into())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
+            let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
-                .expect("tokio runtime build failed");
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::error!(
+                        target: "oatmeal::startup",
+                        "tokio runtime build failed: {error}"
+                    );
+                    std::process::exit(1);
+                }
+            };
             let _ = rt.block_on(app::run_with_readiness(
                 config,
                 page_agent_config,
@@ -45,16 +69,28 @@ fn main() {
             ));
             rt.shutdown_timeout(std::time::Duration::from_secs(5));
         })
-        .expect("failed to spawn runtime thread");
+    {
+        Ok(thread) => thread,
+        Err(error) => {
+            tracing::error!(
+                target: "oatmeal::startup",
+                "failed to spawn runtime thread: {error}"
+            );
+            std::process::exit(1);
+        }
+    };
 
     match ready_rx.blocking_recv() {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            eprintln!("Runtime startup failed: {error}");
+            tracing::error!(target: "oatmeal::startup", "Runtime startup failed: {error}");
             std::process::exit(1);
         }
         Err(_) => {
-            eprintln!("Runtime thread exited before signaling readiness");
+            tracing::error!(
+                target: "oatmeal::startup",
+                "Runtime thread exited before signaling readiness"
+            );
             std::process::exit(1);
         }
     }
@@ -62,23 +98,50 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         if std::env::var("DISPLAY").is_err() {
-            eprintln!("DISPLAY not set — tray init skipped (headless mode)");
+            tracing::error!(
+                target: "oatmeal::tray",
+                "DISPLAY not set - tray init skipped (headless mode)"
+            );
             shutdown_tx.send(()).ok();
             std::process::exit(1);
         }
 
-        gtk::init().expect("GTK init failed");
+        if let Err(error) = gtk::init() {
+            tracing::error!(target: "oatmeal::tray", "GTK init failed: {error}");
+            shutdown_tx.send(()).ok();
+            std::process::exit(1);
+        }
 
         let quit_item = tray_icon::menu::MenuItem::new("Quit", true, None);
         let menu = tray_icon::menu::Menu::new();
-        menu.append(&quit_item).unwrap();
+        if let Err(error) = menu.append(&quit_item) {
+            tracing::error!(target: "oatmeal::tray", "tray menu append failed: {error}");
+            shutdown_tx.send(()).ok();
+            std::process::exit(1);
+        }
 
-        let _tray = tray_icon::TrayIconBuilder::new()
-            .with_icon(load_tray_icon())
+        let tray_icon = match load_tray_icon() {
+            Ok(icon) => icon,
+            Err(error) => {
+                tracing::error!(target: "oatmeal::tray", "tray icon load failed: {error}");
+                shutdown_tx.send(()).ok();
+                std::process::exit(1);
+            }
+        };
+
+        let _tray = match tray_icon::TrayIconBuilder::new()
+            .with_icon(tray_icon)
             .with_tooltip("Oatmeal")
             .with_menu(Box::new(menu))
             .build()
-            .expect("tray icon build failed");
+        {
+            Ok(tray) => tray,
+            Err(error) => {
+                tracing::error!(target: "oatmeal::tray", "tray icon build failed: {error}");
+                shutdown_tx.send(()).ok();
+                std::process::exit(1);
+            }
+        };
 
         loop {
             while gtk::events_pending() {
@@ -99,7 +162,10 @@ fn main() {
 
     #[cfg(not(target_os = "linux"))]
     {
-        eprintln!("Tray event loop not implemented for this platform (deferred to Phase 5)");
+        tracing::warn!(
+            target: "oatmeal::tray",
+            "Tray event loop not implemented for this platform (deferred to Phase 5)"
+        );
         shutdown_tx.send(()).ok();
     }
 
@@ -110,7 +176,10 @@ fn main() {
             break;
         }
         if start.elapsed() > timeout {
-            eprintln!("warning: runtime thread did not exit within 10s");
+            tracing::warn!(
+                target: "oatmeal::shutdown",
+                "runtime thread did not exit within 10s"
+            );
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -124,6 +193,6 @@ mod tray_icon_tests {
 
     #[test]
     fn load_tray_icon_returns_valid_icon() {
-        let _ = load_tray_icon();
+        let _ = load_tray_icon().expect("tray icon should load from embedded asset");
     }
 }
