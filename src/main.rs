@@ -272,6 +272,11 @@ impl ApplicationHandler<TrayLoopEvent> for WinitTrayApp {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("{}", runtime_shared::oatmeal_version_text());
+        return;
+    }
+
     let _log_handle = match logging::init_file_logging() {
         Ok(handle) => handle,
         Err(error) => {
@@ -367,6 +372,14 @@ fn main() {
     };
 
     let mut shutdown_tx = Some(shutdown_tx);
+
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        eprintln!("oatmeal: no graphical display detected (DISPLAY and WAYLAND_DISPLAY are unset)");
+        request_shutdown(&mut shutdown_tx);
+        std::process::exit(1);
+    }
+
     let (menu, tray_items) = match build_tray_menu(&startup_ready.listen_addr) {
         Ok(value) => value,
         Err(error) => {
