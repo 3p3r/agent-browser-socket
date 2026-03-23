@@ -1,3 +1,5 @@
+#[path = "../src/app.rs"]
+mod app;
 #[path = "../src/bashkit_executor.rs"]
 mod bashkit_executor;
 #[path = "../src/browser_detection.rs"]
@@ -10,8 +12,6 @@ mod command_runtime;
 mod configuration;
 #[path = "../src/embedded_binary.rs"]
 mod embedded_binary;
-#[path = "../src/app.rs"]
-mod app;
 #[path = "../src/mcp.rs"]
 mod mcp;
 #[path = "../src/page_agent_runtime.rs"]
@@ -67,9 +67,14 @@ async fn start_mcp_streamable_http_server() -> (String, oneshot::Sender<()>) {
     let base_url = format!("http://{}:{}", config.host, config.port);
 
     tokio::spawn(async move {
-        let _ = mcp::run_mcp_streamable_http(config, page_agent_config, async move {
-            let _ = shutdown_rx.await;
-        }, None)
+        let _ = mcp::run_mcp_streamable_http(
+            config,
+            page_agent_config,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            None,
+        )
         .await;
     });
 

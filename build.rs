@@ -1,17 +1,21 @@
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use image::ImageFormat;
 use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fs;
 use std::io::{Cursor, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const VERSION: &str = "v0.21.4";
 const SKILLS_ARCHIVE_URL: &str =
     "https://github.com/vercel-labs/agent-browser/archive/refs/heads/main.tar.gz";
 const SKILLS_ARCHIVE_PREFIX: &str = "/skills/agent-browser/";
+const LOGO_PNG_BYTES: &[u8] = include_bytes!("logo.png");
 
 fn main() {
     if let Err(error) = run() {
@@ -23,16 +27,23 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("logo.png").display()
+    );
+
     let page_agent_source =
         manifest_dir.join("node_modules/page-agent/dist/iife/page-agent.demo.js");
     println!("cargo:rerun-if-changed={}", page_agent_source.display());
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    prepare_logo_ico(&out_dir)?;
     prepare_sanitized_page_agent_bundle(&page_agent_source, &out_dir)?;
     prepare_upstream_skills(&out_dir)?;
 
     let target_os = env::var("CARGO_CFG_TARGET_OS")?;
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH")?;
+    prepare_windows_exe_icon(&target_os, &out_dir)?;
     let asset_name = asset_name_for_target(&target_os, &target_arch)?;
     let download_url = format!(
         "https://github.com/vercel-labs/agent-browser/releases/download/{VERSION}/{asset_name}"
@@ -49,6 +60,75 @@ fn run() -> Result<(), Box<dyn Error>> {
         encoder.finish()?;
     }
 
+    Ok(())
+}
+
+fn prepare_windows_exe_icon(target_os: &str, out_dir: &Path) -> Result<(), Box<dyn Error>> {
+    if target_os != "windows" {
+        return Ok(());
+    }
+
+    let icon_path = out_dir.join("logo.ico");
+    let mut resource = winres::WindowsResource::new();
+    resource.set_icon(icon_path.to_string_lossy().as_ref());
+
+    if !cfg!(windows) {
+        println!("cargo:rerun-if-env-changed=RC");
+        let rc_path = discover_rc_compiler()?;
+        let shim_path = out_dir.join("rc.exe");
+        write_rc_shim(&shim_path, &rc_path)?;
+        resource.set_toolkit_path(out_dir.to_string_lossy().as_ref());
+    }
+
+    resource.compile()?;
+    Ok(())
+}
+
+fn discover_rc_compiler() -> Result<PathBuf, Box<dyn Error>> {
+    if let Ok(explicit_rc) = env::var("RC") {
+        let candidate = PathBuf::from(explicit_rc);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    for command in ["llvm-rc", "llvm-windres", "x86_64-w64-mingw32-windres"] {
+        if let Ok(output) = std::process::Command::new("which").arg(command).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(PathBuf::from(path));
+                }
+            }
+        }
+    }
+
+    Err("unable to locate a resource compiler; set RC to llvm-rc (or compatible) path".into())
+}
+
+fn write_rc_shim(shim_path: &Path, rc_path: &Path) -> Result<(), Box<dyn Error>> {
+    let rc_escaped = rc_path.to_string_lossy().replace('"', "\\\"");
+    let script = format!("#!/usr/bin/env sh\nexec \"{}\" \"$@\"\n", rc_escaped);
+    fs::write(shim_path, script)?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(shim_path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(shim_path, permissions)?;
+    }
+    Ok(())
+}
+
+fn prepare_logo_ico(out_dir: &Path) -> Result<(), Box<dyn Error>> {
+    let image = image::load_from_memory_with_format(LOGO_PNG_BYTES, ImageFormat::Png)?;
+    let icon_image = if image.width() > 256 || image.height() > 256 {
+        image.thumbnail(256, 256)
+    } else {
+        image
+    };
+    let mut encoded = Cursor::new(Vec::new());
+    icon_image.write_to(&mut encoded, ImageFormat::Ico)?;
+    fs::write(out_dir.join("logo.ico"), encoded.into_inner())?;
     Ok(())
 }
 

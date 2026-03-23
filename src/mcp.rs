@@ -39,6 +39,8 @@ use tower_http::cors::{Any, CorsLayer, ExposeHeaders};
 use uuid::Uuid;
 
 const ADMIN_DASHBOARD_HTML: &str = include_str!("admin_dashboard.html");
+const LOGO_PNG: &[u8] = include_bytes!("../logo.png");
+const LOGO_ICO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/logo.ico"));
 include!(concat!(env!("OUT_DIR"), "/skills_manifest.rs"));
 
 type ResourceStore = Arc<RwLock<HashMap<String, ResourceEntry>>>;
@@ -510,6 +512,9 @@ where
 
     let app = Router::new()
         .route("/", get(dashboard_handler))
+        .route("/logo.png", get(logo_png_handler))
+        .route("/logo.ico", get(logo_ico_handler))
+        .route("/favicon.ico", get(favicon_handler))
         .route("/skills", get(skills_index_handler))
         .route("/skills/", get(skills_index_handler))
         .route("/skills/{*path}", get(skills_file_handler))
@@ -561,6 +566,18 @@ async fn dashboard_handler() -> Html<&'static str> {
     Html(ADMIN_DASHBOARD_HTML)
 }
 
+async fn logo_png_handler() -> Response {
+    ([(header::CONTENT_TYPE, "image/png")], LOGO_PNG).into_response()
+}
+
+async fn logo_ico_handler() -> Response {
+    ([(header::CONTENT_TYPE, "image/x-icon")], LOGO_ICO).into_response()
+}
+
+async fn favicon_handler() -> Response {
+    logo_ico_handler().await
+}
+
 async fn skills_index_handler() -> Html<String> {
     Html(render_skills_index_html())
 }
@@ -598,6 +615,7 @@ async fn skills_file_handler(AxumPath(path): AxumPath<String>) -> Response {
 mod tests {
     use super::*;
     use crate::runtime_shared::oatmeal_cache_dir_text;
+    use axum::body::to_bytes;
 
     #[tokio::test]
     async fn command_preserves_paths_and_applies_ignore_filter() {
@@ -734,5 +752,41 @@ mod tests {
             .expect("first content text");
 
         assert!(text.contains(&oatmeal_cache_dir_text()), "text={text}");
+    }
+
+    #[tokio::test]
+    async fn logo_png_handler_returns_embedded_png() {
+        let response = logo_png_handler().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/png")
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read png body");
+        assert_eq!(body.as_ref(), LOGO_PNG);
+    }
+
+    #[tokio::test]
+    async fn favicon_handler_returns_embedded_ico() {
+        let response = favicon_handler().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/x-icon")
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read ico body");
+        assert_eq!(body.as_ref(), LOGO_ICO);
     }
 }
