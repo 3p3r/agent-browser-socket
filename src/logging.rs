@@ -12,6 +12,17 @@ pub fn oatmeal_logs_dir() -> std::path::PathBuf {
     crate::runtime_shared::oatmeal_cache_dir().join("logs")
 }
 
+pub fn oatmeal_log_file_path() -> std::path::PathBuf {
+    oatmeal_logs_dir().join("oatmeal.log")
+}
+
+pub fn archive_pattern_for(log_dir: &std::path::Path) -> String {
+    log_dir
+        .join("oatmeal.{}.log.gz")
+        .to_string_lossy()
+        .into_owned()
+}
+
 pub fn build_file_logging_config(
     log_path: &std::path::Path,
     archive_pattern: &str,
@@ -39,13 +50,20 @@ pub fn build_file_logging_config(
 }
 
 pub fn init_file_logging() -> Result<log4rs::Handle, Box<dyn std::error::Error>> {
-    let log_dir = oatmeal_logs_dir();
-    std::fs::create_dir_all(&log_dir)?;
+    init_file_logging_with_options(&oatmeal_logs_dir(), 5 * 1024 * 1024, 3)
+}
+
+pub fn init_file_logging_with_options(
+    log_dir: &std::path::Path,
+    max_size_bytes: u64,
+    archive_count: u32,
+) -> Result<log4rs::Handle, Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(log_dir)?;
 
     let log_path = log_dir.join("oatmeal.log");
-    let archive_pattern = log_dir.join("oatmeal.{}.log.gz").to_string_lossy().into_owned();
+    let archive_pattern = archive_pattern_for(log_dir);
 
-    let config = build_file_logging_config(&log_path, &archive_pattern, 5 * 1024 * 1024, 3)?;
+    let config = build_file_logging_config(&log_path, &archive_pattern, max_size_bytes, archive_count)?;
     let handle = log4rs::init_config(config)?;
     Ok(handle)
 }
