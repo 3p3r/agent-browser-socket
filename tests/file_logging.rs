@@ -1,7 +1,7 @@
-#[path = "../src/bashkit_executor.rs"]
-mod bashkit_executor;
 #[path = "../src/app.rs"]
 mod app;
+#[path = "../src/bashkit_executor.rs"]
+mod bashkit_executor;
 #[path = "../src/browser_detection.rs"]
 mod browser_detection;
 #[path = "../src/command_args.rs"]
@@ -126,12 +126,19 @@ fn child_file_logging_rotation_retains_at_most_three_archives(log_dir: &std::pat
         }
     }
 
-    assert!(archives.len() <= 3, "expected <=3 archives, found {}", archives.len());
+    assert!(
+        archives.len() <= 3,
+        "expected <=3 archives, found {}",
+        archives.len()
+    );
 
     let has_expected_archive = ["oatmeal.1.log.gz", "oatmeal.2.log.gz", "oatmeal.3.log.gz"]
         .iter()
         .any(|expected| temp_log_dir.join(expected).exists());
-    assert!(has_expected_archive, "expected at least one known archive name");
+    assert!(
+        has_expected_archive,
+        "expected at least one known archive name"
+    );
 
     let first_archive = archives
         .first()
@@ -267,7 +274,8 @@ fn file_logging_captures_existing_mcp_listen_log_call_site() {
 
 #[test]
 fn file_logging_init_failure_uses_stderr_and_exits_nonzero() {
-    let binary_path = std::env::var("CARGO_BIN_EXE_oatmeal").expect("oatmeal binary path is set in integration tests");
+    let binary_path = std::env::var("CARGO_BIN_EXE_oatmeal")
+        .expect("oatmeal binary path is set in integration tests");
     let output = Command::new(binary_path)
         .env("XDG_CACHE_HOME", "/proc/1")
         .env_remove("DISPLAY")

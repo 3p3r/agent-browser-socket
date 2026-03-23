@@ -143,5 +143,7 @@ vite.config.ts.timestamp-*
 
 /target
 /artifacts
-.cargo-*
-.target-*
+/.cargo-*
+/.target-*
+/.planning
+copilot-instructions.md

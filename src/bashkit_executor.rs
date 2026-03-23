@@ -20,7 +20,6 @@ pub struct BashkitExecutor {
 
 #[derive(Debug, Clone)]
 pub enum AgentBrowserPathPolicy {
-    HostNative,
     McpCacheRooted(PathBuf),
 }
 
@@ -159,8 +158,12 @@ fn read_capture_file(path: &Path) -> String {
 }
 
 impl BashkitExecutor {
+    #[cfg(test)]
     pub fn new(binary_path: PathBuf) -> Self {
-        Self::new_with_path_policy(binary_path, AgentBrowserPathPolicy::HostNative)
+        Self::new_with_path_policy(
+            binary_path,
+            AgentBrowserPathPolicy::McpCacheRooted(std::env::temp_dir()),
+        )
     }
 
     pub fn new_with_path_policy(binary_path: PathBuf, path_policy: AgentBrowserPathPolicy) -> Self {
@@ -328,12 +331,8 @@ fn looks_like_output_path(arg: &str) -> bool {
 }
 
 fn rewrite_output_path(arg: &str, path_policy: &AgentBrowserPathPolicy) -> Option<PathBuf> {
-    match path_policy {
-        AgentBrowserPathPolicy::HostNative => None,
-        AgentBrowserPathPolicy::McpCacheRooted(cache_root) => {
-            Some(cache_root.join(path_to_cache_relative(arg)))
-        }
-    }
+    let AgentBrowserPathPolicy::McpCacheRooted(cache_root) = path_policy;
+    Some(cache_root.join(path_to_cache_relative(arg)))
 }
 
 fn path_to_cache_relative(raw: &str) -> PathBuf {

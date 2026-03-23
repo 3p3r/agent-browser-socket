@@ -23,7 +23,6 @@ impl Default for PageAgentConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
-    pub auth_url: Option<String>,
     pub port: u16,
     pub host: String,
     pub browser_path: Option<String>,
@@ -33,7 +32,6 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            auth_url: None,
             port: 9607,
             host: "0.0.0.0".to_string(),
             browser_path: None,
@@ -54,7 +52,6 @@ pub fn load_config() -> Result<AppConfig, config::ConfigError> {
     let has_oatmeal_env = env::vars().any(|(key, _)| key.starts_with("OATMEAL_"));
 
     let mut builder = Config::builder()
-        .set_default("auth_url", defaults.auth_url)?
         .set_default("port", defaults.port)?
         .set_default("host", defaults.host)?
         .set_default("browser_path", defaults.browser_path)?
@@ -95,6 +92,10 @@ pub fn load_config() -> Result<AppConfig, config::ConfigError> {
         if !v.is_empty() {
             config.page_agent.key = v;
         }
+    }
+    if config.browser_path.is_none() {
+        config.browser_path = crate::browser_detection::find_chrome_browser()
+            .map(|path| path.to_string_lossy().to_string());
     }
     Ok(config)
 }

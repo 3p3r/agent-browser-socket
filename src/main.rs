@@ -1,9 +1,12 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod app;
 mod bashkit_executor;
 mod browser_detection;
 mod command_args;
 mod command_runtime;
 mod configuration;
+mod desktop;
 mod embedded_binary;
 mod logging;
 mod mcp;
@@ -13,7 +16,136 @@ mod sandbox_files;
 mod screenshot;
 mod server;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use url::Url;
+use winit::application::ApplicationHandler;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+
 static LOGO_PNG: &[u8] = include_bytes!("../logo.png");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayAction {
+    OpenLogs,
+    CleanCache,
+    Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrayMenuEntry {
+    label: String,
+    enabled: bool,
+    action: Option<TrayAction>,
+}
+
+struct TrayMenuHandles {
+    open_logs: tray_icon::menu::MenuItem,
+    clean_cache: tray_icon::menu::MenuItem,
+    shutdown: tray_icon::menu::MenuItem,
+}
+
+#[derive(Debug, Clone)]
+enum TrayLoopEvent {
+    Menu(tray_icon::menu::MenuEvent),
+    RuntimeExited,
+    ShutdownRequested,
+}
+
+fn tray_menu_entries(listen_addr: &str) -> Vec<TrayMenuEntry> {
+    vec![
+        TrayMenuEntry {
+            label: runtime_shared::oatmeal_version_text(),
+            enabled: false,
+            action: None,
+        },
+        TrayMenuEntry {
+            label: format!("Listening: {listen_addr}"),
+            enabled: false,
+            action: None,
+        },
+        TrayMenuEntry {
+            label: "Open Logs".to_string(),
+            enabled: true,
+            action: Some(TrayAction::OpenLogs),
+        },
+        TrayMenuEntry {
+            label: "Clean Cache".to_string(),
+            enabled: true,
+            action: Some(TrayAction::CleanCache),
+        },
+        TrayMenuEntry {
+            label: "Shutdown".to_string(),
+            enabled: true,
+            action: Some(TrayAction::Shutdown),
+        },
+    ]
+}
+
+fn build_tray_menu(listen_addr: &str) -> Result<(tray_icon::menu::Menu, TrayMenuHandles), String> {
+    let entries = tray_menu_entries(listen_addr);
+    let version_label = entries
+        .first()
+        .map(|entry| entry.label.clone())
+        .ok_or_else(|| "tray menu entries are empty".to_string())?;
+    let listen_label = entries
+        .get(1)
+        .map(|entry| entry.label.clone())
+        .ok_or_else(|| "tray menu listening entry is missing".to_string())?;
+    let version = tray_icon::menu::MenuItem::new(&version_label, false, None);
+    let listening = tray_icon::menu::MenuItem::new(&listen_label, false, None);
+    let open_logs = tray_icon::menu::MenuItem::new("Open Logs", true, None);
+    let clean_cache = tray_icon::menu::MenuItem::new("Clean Cache", true, None);
+    let shutdown = tray_icon::menu::MenuItem::new("Shutdown", true, None);
+
+    let menu = tray_icon::menu::Menu::new();
+    menu.append(&version)
+        .map_err(|error| format!("tray menu append failed for version label: {error}"))?;
+    menu.append(&listening)
+        .map_err(|error| format!("tray menu append failed for listening label: {error}"))?;
+    menu.append(&open_logs)
+        .map_err(|error| format!("tray menu append failed for open logs: {error}"))?;
+    menu.append(&clean_cache)
+        .map_err(|error| format!("tray menu append failed for clean cache: {error}"))?;
+    menu.append(&shutdown)
+        .map_err(|error| format!("tray menu append failed for shutdown: {error}"))?;
+
+    Ok((
+        menu,
+        TrayMenuHandles {
+            open_logs,
+            clean_cache,
+            shutdown,
+        },
+    ))
+}
+
+fn request_shutdown(shutdown_tx: &mut Option<tokio::sync::oneshot::Sender<()>>) -> bool {
+    match shutdown_tx.take() {
+        Some(tx) => tx.send(()).is_ok(),
+        None => false,
+    }
+}
+
+fn dispatch_tray_action(action: TrayAction) -> Result<(), String> {
+    match action {
+        TrayAction::OpenLogs => {
+            let logs_dir = logging::oatmeal_logs_dir();
+            desktop::open_in_file_manager(&logs_dir)
+        }
+        TrayAction::CleanCache => {
+            let cleaned = embedded_binary::clean_cached_binary()
+                .map_err(|error| format!("failed to clean cache: {error}"))?;
+            let body = if cleaned {
+                "Embedded browser cache cleaned."
+            } else {
+                "Browser cache cleaned (nothing to remove)."
+            };
+            desktop::show_notification("Browser cache cleaned", body)
+                .map_err(|error| format!("cache clean notification failed: {error}"))
+        }
+        TrayAction::Shutdown => Ok(()),
+    }
+}
 
 fn load_tray_icon() -> Result<tray_icon::Icon, String> {
     let img = image::load_from_memory(LOGO_PNG)
@@ -22,6 +154,121 @@ fn load_tray_icon() -> Result<tray_icon::Icon, String> {
     let (width, height) = img.dimensions();
     tray_icon::Icon::from_rgba(img.into_raw(), width, height)
         .map_err(|error| format!("Icon::from_rgba failed: {error}"))
+}
+
+fn launched_uri_argument() -> Option<String> {
+    std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().trim_matches('"').to_string())
+        .find(|arg| arg.starts_with(&format!("{}://", server::URI_SCHEME.unsecure())))
+}
+
+fn apply_uri_overrides(config: &mut configuration::AppConfig, uri: &str) -> Result<(), String> {
+    let parsed = Url::parse(uri).map_err(|error| format!("invalid URI launch payload: {error}"))?;
+
+    if let Some(host) = parsed
+        .query_pairs()
+        .find_map(|(key, value)| (key == "host").then(|| value.into_owned()))
+        .filter(|host| !host.is_empty())
+    {
+        config.host = host;
+    }
+
+    if let Some(port) = parsed
+        .query_pairs()
+        .find_map(|(key, value)| (key == "port").then(|| value.into_owned()))
+    {
+        config.port = port
+            .parse::<u16>()
+            .map_err(|error| format!("invalid URI launch port '{port}': {error}"))?;
+    }
+
+    Ok(())
+}
+
+struct WinitTrayApp {
+    proxy: EventLoopProxy<TrayLoopEvent>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    tray_items: TrayMenuHandles,
+    runtime_finished: Arc<AtomicBool>,
+    runtime_exit_sent: bool,
+    _tray: tray_icon::TrayIcon,
+}
+
+impl WinitTrayApp {
+    fn handle_menu_event(
+        &mut self,
+        event: tray_icon::menu::MenuEvent,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let action = if event.id == self.tray_items.open_logs.id() {
+            Some(TrayAction::OpenLogs)
+        } else if event.id == self.tray_items.clean_cache.id() {
+            Some(TrayAction::CleanCache)
+        } else {
+            None
+        };
+
+        if let Some(action) = action {
+            if let Err(error) = dispatch_tray_action(action) {
+                tracing::error!(target: "oatmeal::tray", "tray action failed: {error}");
+                let action_name = match action {
+                    TrayAction::OpenLogs => "Open Logs",
+                    TrayAction::CleanCache => "Clean Cache",
+                    TrayAction::Shutdown => "Shutdown",
+                };
+                if let Err(notify_error) = desktop::action_failure_notification(action_name, &error)
+                {
+                    tracing::error!(
+                        target: "oatmeal::tray",
+                        "tray failure notification failed: {notify_error}"
+                    );
+                }
+            }
+        }
+
+        if self.runtime_finished.load(Ordering::SeqCst) {
+            event_loop.exit();
+        }
+    }
+
+    fn handle_shutdown(&mut self, event_loop: &ActiveEventLoop) {
+        if !request_shutdown(&mut self.shutdown_tx) {
+            tracing::warn!(target: "oatmeal::tray", "shutdown already requested");
+        }
+        event_loop.exit();
+    }
+}
+
+impl ApplicationHandler<TrayLoopEvent> for WinitTrayApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(ControlFlow::Wait);
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: TrayLoopEvent) {
+        match event {
+            TrayLoopEvent::Menu(menu_event) => self.handle_menu_event(menu_event, event_loop),
+            TrayLoopEvent::RuntimeExited => event_loop.exit(),
+            TrayLoopEvent::ShutdownRequested => self.handle_shutdown(event_loop),
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.runtime_finished.load(Ordering::SeqCst) && !self.runtime_exit_sent {
+            self.runtime_exit_sent = true;
+            if self.proxy.send_event(TrayLoopEvent::RuntimeExited).is_err() {
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        _event: winit::event::WindowEvent,
+    ) {
+    }
 }
 
 fn main() {
@@ -33,17 +280,29 @@ fn main() {
         }
     };
 
-    let config = match configuration::load_config() {
+    let mut config = match configuration::load_config() {
         Ok(config) => config,
         Err(error) => {
             tracing::error!(target: "oatmeal::startup", "config load failed: {error}");
             std::process::exit(1);
         }
     };
+
+    if let Some(uri) = launched_uri_argument() {
+        if let Err(error) = apply_uri_overrides(&mut config, &uri) {
+            tracing::error!(target: "oatmeal::startup", "URI launch parse failed: {error}");
+            std::process::exit(1);
+        }
+    }
+
     let page_agent_config = config.page_agent.clone();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    let (ready_tx, ready_rx) =
+        tokio::sync::oneshot::channel::<Result<runtime_shared::StartupReady, String>>();
+
+    let runtime_finished = Arc::new(AtomicBool::new(false));
+    let runtime_finished_worker = Arc::clone(&runtime_finished);
 
     let bg_thread = match std::thread::Builder::new()
         .name("oatmeal-rt".into())
@@ -68,8 +327,8 @@ fn main() {
                 shutdown_rx,
             ));
             rt.shutdown_timeout(std::time::Duration::from_secs(5));
-        })
-    {
+            runtime_finished_worker.store(true, Ordering::SeqCst);
+        }) {
         Ok(thread) => thread,
         Err(error) => {
             tracing::error!(
@@ -80,8 +339,20 @@ fn main() {
         }
     };
 
-    match ready_rx.blocking_recv() {
-        Ok(Ok(())) => {}
+    let startup_ready = match ready_rx.blocking_recv() {
+        Ok(Ok(startup_ready)) => {
+            let startup_message = format!(
+                "MCP available at {} ({})",
+                startup_ready.display_url, startup_ready.listen_addr
+            );
+            if let Err(error) = desktop::show_notification("Oatmeal is running", &startup_message) {
+                tracing::error!(
+                    target: "oatmeal::startup",
+                    "startup notification failed: {error}"
+                );
+            }
+            startup_ready
+        }
         Ok(Err(error)) => {
             tracing::error!(target: "oatmeal::startup", "Runtime startup failed: {error}");
             std::process::exit(1);
@@ -93,81 +364,72 @@ fn main() {
             );
             std::process::exit(1);
         }
-    }
+    };
 
-    #[cfg(target_os = "linux")]
+    let mut shutdown_tx = Some(shutdown_tx);
+    let (menu, tray_items) = match build_tray_menu(&startup_ready.listen_addr) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(target: "oatmeal::tray", "{error}");
+            request_shutdown(&mut shutdown_tx);
+            std::process::exit(1);
+        }
+    };
+
+    let tray_icon = match load_tray_icon() {
+        Ok(icon) => icon,
+        Err(error) => {
+            tracing::error!(target: "oatmeal::tray", "tray icon load failed: {error}");
+            request_shutdown(&mut shutdown_tx);
+            std::process::exit(1);
+        }
+    };
+
+    let tray = match tray_icon::TrayIconBuilder::new()
+        .with_icon(tray_icon)
+        .with_tooltip("Oatmeal")
+        .with_menu(Box::new(menu))
+        .build()
     {
-        if std::env::var("DISPLAY").is_err() {
-            tracing::error!(
-                target: "oatmeal::tray",
-                "DISPLAY not set - tray init skipped (headless mode)"
-            );
-            shutdown_tx.send(()).ok();
+        Ok(tray) => tray,
+        Err(error) => {
+            tracing::error!(target: "oatmeal::tray", "tray icon build failed: {error}");
+            request_shutdown(&mut shutdown_tx);
             std::process::exit(1);
         }
+    };
 
-        if let Err(error) = gtk::init() {
-            tracing::error!(target: "oatmeal::tray", "GTK init failed: {error}");
-            shutdown_tx.send(()).ok();
-            std::process::exit(1);
-        }
+    let event_loop = EventLoop::<TrayLoopEvent>::with_user_event()
+        .build()
+        .expect("winit event loop should build");
+    let proxy = event_loop.create_proxy();
+    let handler_proxy = proxy.clone();
+    let shutdown_id = tray_items.shutdown.id().clone();
+    tray_icon::menu::MenuEvent::set_event_handler(Some(
+        move |event: tray_icon::menu::MenuEvent| {
+            let forwarded = if event.id == shutdown_id {
+                TrayLoopEvent::ShutdownRequested
+            } else {
+                TrayLoopEvent::Menu(event)
+            };
+            let _ = handler_proxy.send_event(forwarded);
+        },
+    ));
 
-        let quit_item = tray_icon::menu::MenuItem::new("Quit", true, None);
-        let menu = tray_icon::menu::Menu::new();
-        if let Err(error) = menu.append(&quit_item) {
-            tracing::error!(target: "oatmeal::tray", "tray menu append failed: {error}");
-            shutdown_tx.send(()).ok();
-            std::process::exit(1);
-        }
+    let mut app = WinitTrayApp {
+        proxy,
+        shutdown_tx,
+        tray_items,
+        runtime_finished,
+        runtime_exit_sent: false,
+        _tray: tray,
+    };
 
-        let tray_icon = match load_tray_icon() {
-            Ok(icon) => icon,
-            Err(error) => {
-                tracing::error!(target: "oatmeal::tray", "tray icon load failed: {error}");
-                shutdown_tx.send(()).ok();
-                std::process::exit(1);
-            }
-        };
-
-        let _tray = match tray_icon::TrayIconBuilder::new()
-            .with_icon(tray_icon)
-            .with_tooltip("Oatmeal")
-            .with_menu(Box::new(menu))
-            .build()
-        {
-            Ok(tray) => tray,
-            Err(error) => {
-                tracing::error!(target: "oatmeal::tray", "tray icon build failed: {error}");
-                shutdown_tx.send(()).ok();
-                std::process::exit(1);
-            }
-        };
-
-        loop {
-            while gtk::events_pending() {
-                gtk::main_iteration_do(true);
-            }
-            if bg_thread.is_finished() {
-                break;
-            }
-            if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-                if event.id == quit_item.id() {
-                    shutdown_tx.send(()).ok();
-                    break;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+    if let Err(error) = event_loop.run_app(&mut app) {
+        tracing::error!(target: "oatmeal::tray", "winit run_app failed: {error}");
+        request_shutdown(&mut app.shutdown_tx);
     }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        tracing::warn!(
-            target: "oatmeal::tray",
-            "Tray event loop not implemented for this platform (deferred to Phase 5)"
-        );
-        shutdown_tx.send(()).ok();
-    }
+    tray_icon::menu::MenuEvent::set_event_handler::<fn(tray_icon::menu::MenuEvent)>(None);
 
     let timeout = std::time::Duration::from_secs(10);
     let start = std::time::Instant::now();
@@ -194,5 +456,63 @@ mod tray_icon_tests {
     #[test]
     fn load_tray_icon_returns_valid_icon() {
         let _ = load_tray_icon().expect("tray icon should load from embedded asset");
+    }
+
+    #[test]
+    fn tray_menu_contract_matches_phase4_requirements() {
+        let entries = tray_menu_entries("127.0.0.1:9607");
+        let labels: Vec<&str> = entries.iter().map(|entry| entry.label.as_str()).collect();
+        let version_label = runtime_shared::oatmeal_version_text();
+        assert_eq!(
+            labels,
+            vec![
+                version_label.as_str(),
+                "Listening: 127.0.0.1:9607",
+                "Open Logs",
+                "Clean Cache",
+                "Shutdown"
+            ]
+        );
+    }
+
+    #[test]
+    fn tray_version_entry_is_disabled() {
+        let entries = tray_menu_entries("127.0.0.1:9607");
+        assert!(!entries[0].enabled);
+        assert!(entries[0].action.is_none());
+        assert!(!entries[1].enabled);
+        assert!(entries[1].action.is_none());
+    }
+
+    #[test]
+    fn tray_shutdown_action_uses_oneshot_path() {
+        let (tx, _rx) = tokio::sync::oneshot::channel::<()>();
+        let mut shutdown = Some(tx);
+        assert!(request_shutdown(&mut shutdown));
+    }
+
+    #[test]
+    fn repeated_shutdown_action_is_benign() {
+        let (tx, _rx) = tokio::sync::oneshot::channel::<()>();
+        let mut shutdown = Some(tx);
+        assert!(request_shutdown(&mut shutdown));
+        assert!(!request_shutdown(&mut shutdown));
+    }
+
+    #[test]
+    fn uri_overrides_apply_host_and_port() {
+        let mut config = configuration::AppConfig::default();
+        apply_uri_overrides(&mut config, "oatmeal://open?host=127.0.0.1&port=9911")
+            .expect("valid URI overrides");
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 9911);
+    }
+
+    #[test]
+    fn uri_overrides_reject_invalid_port() {
+        let mut config = configuration::AppConfig::default();
+        let error = apply_uri_overrides(&mut config, "oatmeal://open?port=not-a-port")
+            .expect_err("invalid port should fail");
+        assert!(error.contains("invalid URI launch port"));
     }
 }

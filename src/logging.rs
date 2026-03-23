@@ -1,8 +1,6 @@
 use log::LevelFilter;
 use log4rs::append::rolling_file::policy::compound::{
-    roll::fixed_window::FixedWindowRoller,
-    trigger::size::SizeTrigger,
-    CompoundPolicy,
+    roll::fixed_window::FixedWindowRoller, trigger::size::SizeTrigger, CompoundPolicy,
 };
 use log4rs::append::rolling_file::RollingFileAppender;
 use log4rs::config::{Appender, Config, Root};
@@ -10,10 +8,6 @@ use log4rs::encode::pattern::PatternEncoder;
 
 pub fn oatmeal_logs_dir() -> std::path::PathBuf {
     crate::runtime_shared::oatmeal_cache_dir().join("logs")
-}
-
-pub fn oatmeal_log_file_path() -> std::path::PathBuf {
-    oatmeal_logs_dir().join("oatmeal.log")
 }
 
 pub fn archive_pattern_for(log_dir: &std::path::Path) -> String {
@@ -63,7 +57,8 @@ pub fn init_file_logging_with_options(
     let log_path = log_dir.join("oatmeal.log");
     let archive_pattern = archive_pattern_for(log_dir);
 
-    let config = build_file_logging_config(&log_path, &archive_pattern, max_size_bytes, archive_count)?;
+    let config =
+        build_file_logging_config(&log_path, &archive_pattern, max_size_bytes, archive_count)?;
     let handle = log4rs::init_config(config)?;
     Ok(handle)
 }
@@ -74,7 +69,9 @@ mod tests {
 
     #[test]
     fn oatmeal_logs_dir_ends_with_expected_suffix() {
-        assert!(oatmeal_logs_dir().to_string_lossy().ends_with("oatmeal/logs"));
+        assert!(oatmeal_logs_dir()
+            .to_string_lossy()
+            .ends_with("oatmeal/logs"));
     }
 
     #[test]
@@ -90,7 +87,10 @@ mod tests {
         std::fs::create_dir_all(&temp_root).expect("failed to create temp root");
 
         let log_path = temp_root.join("oatmeal.log");
-        let archive_pattern = temp_root.join("oatmeal.{}.log.gz").to_string_lossy().into_owned();
+        let archive_pattern = temp_root
+            .join("oatmeal.{}.log.gz")
+            .to_string_lossy()
+            .into_owned();
 
         let config = build_file_logging_config(&log_path, &archive_pattern, 5 * 1024 * 1024, 3);
         assert!(config.is_ok());

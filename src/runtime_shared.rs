@@ -2,12 +2,23 @@ use crate::embedded_binary::cache_root_dir;
 use crate::screenshot::{capture_all_screenshots, ScreenshotResult};
 use serde_json::Value;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupReady {
+    pub listen_addr: String,
+    pub display_url: String,
+}
+
 pub fn oatmeal_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
 pub fn oatmeal_version_text() -> String {
-    format!("oatmeal {}", oatmeal_version())
+    format!("Oatmeal v{}", oatmeal_version())
+}
+
+pub fn mcp_display_url(host: &str, port: u16) -> String {
+    let display_host = if host == "0.0.0.0" { "localhost" } else { host };
+    format!("http://{display_host}:{port}/mcp")
 }
 
 pub fn oatmeal_version_payload() -> Value {
@@ -35,5 +46,26 @@ pub fn capture_system_screenshots() -> Result<Vec<ScreenshotResult>, String> {
         Ok(Ok(screenshots)) => Ok(screenshots),
         Ok(Err(error)) => Err(format!("screenshot failed: {error}")),
         Err(_) => Err("screenshot failed: panic in capture backend".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_display_url_normalizes_wildcard_host() {
+        assert_eq!(
+            mcp_display_url("0.0.0.0", 9607),
+            "http://localhost:9607/mcp"
+        );
+    }
+
+    #[test]
+    fn mcp_display_url_preserves_explicit_host() {
+        assert_eq!(
+            mcp_display_url("127.0.0.1", 9607),
+            "http://127.0.0.1:9607/mcp"
+        );
     }
 }

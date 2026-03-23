@@ -25,7 +25,6 @@ pub struct CommandExecutionResult {
 
 #[derive(Clone)]
 pub enum CommandExecutionMode {
-    Cli,
     Mcp { cache_root: std::path::PathBuf },
 }
 
@@ -40,13 +39,11 @@ pub async fn execute_prepared_command(
     command_env: Option<&HashMap<String, String>>,
     execution_mode: CommandExecutionMode,
 ) -> CommandExecutionResult {
-    let executor = match execution_mode {
-        CommandExecutionMode::Cli => BashkitExecutor::new(binary_path.to_path_buf()),
-        CommandExecutionMode::Mcp { cache_root } => BashkitExecutor::new_with_path_policy(
-            binary_path.to_path_buf(),
-            AgentBrowserPathPolicy::McpCacheRooted(cache_root),
-        ),
-    };
+    let CommandExecutionMode::Mcp { cache_root } = execution_mode;
+    let executor = BashkitExecutor::new_with_path_policy(
+        binary_path.to_path_buf(),
+        AgentBrowserPathPolicy::McpCacheRooted(cache_root),
+    );
     let execution = executor.execute(&prepared, command_env).await;
 
     let page_agent_injection = if prepared.should_inject_page_agent && execution.exit_code == 0 {

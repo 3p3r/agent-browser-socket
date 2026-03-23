@@ -1,3 +1,4 @@
+use crate::app::ensure_uri_scheme_registered;
 use crate::command_runtime::{
     execute_prepared_command, prepare_script_command, CommandExecutionMode,
 };
@@ -7,6 +8,7 @@ use crate::runtime_shared::{
     capture_system_screenshots, oatmeal_cache_dir_payload, oatmeal_version, oatmeal_version_payload,
 };
 use crate::sandbox_files::prepare_sandbox_files;
+use crate::server::{unregister_uri_scheme, URI_SCHEME};
 use axum::extract::Path as AxumPath;
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -20,13 +22,10 @@ use rmcp::{
     schemars,
     service::RequestContext,
     tool, tool_handler, tool_router,
-    transport::{
-        stdio,
-        streamable_http_server::{
-            session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-        },
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     },
-    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
+    ErrorData as McpError, RoleServer, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -34,6 +33,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::oneshot;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer, ExposeHeaders};
 use uuid::Uuid;
@@ -96,6 +96,12 @@ pub struct DeleteAllResourcesInput {}
     description = "Return the cache directory used by oatmeal for embedded assets and MCP-side file outputs."
 )]
 pub struct CacheDirectoryInput {}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(description = "Register or unregister the oatmeal:// URI scheme handler.")]
+pub struct UriSchemeInput {
+    pub action: String,
+}
 
 #[derive(Clone)]
 pub struct SystemMcpServer {
@@ -358,6 +364,43 @@ impl SystemMcpServer {
             serde_json::to_string(&response).unwrap_or_default(),
         )]))
     }
+
+    #[tool(
+        name = "uri_scheme",
+        description = "Register or unregister the oatmeal:// URI scheme handler"
+    )]
+    async fn uri_scheme(
+        &self,
+        Parameters(input): Parameters<UriSchemeInput>,
+    ) -> Result<CallToolResult, McpError> {
+        match input.action.as_str() {
+            "register" => match ensure_uri_scheme_registered() {
+                Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "registered {}:// URI scheme",
+                    URI_SCHEME.unsecure()
+                ))])),
+                Err(error) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "failed to register URI scheme: {error}"
+                ))])),
+            },
+            "unregister" => match unregister_uri_scheme() {
+                Ok(true) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "unregistered {}:// URI scheme",
+                    URI_SCHEME.unsecure()
+                ))])),
+                Ok(false) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "{}:// URI scheme already unregistered",
+                    URI_SCHEME.unsecure()
+                ))])),
+                Err(error) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "failed to unregister URI scheme: {error}"
+                ))])),
+            },
+            _ => Ok(CallToolResult::error(vec![Content::text(
+                "invalid action; expected 'register' or 'unregister'".to_string(),
+            )])),
+        }
+    }
 }
 
 #[tool_handler]
@@ -434,11 +477,23 @@ pub async fn run_mcp_streamable_http<F>(
     config: AppConfig,
     page_agent_config: PageAgentConfig,
     shutdown: F,
+    ready_tx: Option<oneshot::Sender<Result<crate::runtime_shared::StartupReady, String>>>,
 ) -> Result<i32, Box<dyn std::error::Error>>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
+    let binary_path = match resolve_binary_path(config.browser_path.as_deref()) {
+        Ok(path) => path,
+        Err(error) => {
+            if let Some(tx) = ready_tx {
+                tx.send(Err(format!(
+                    "failed to resolve embedded browser binary: {error}"
+                )))
+                .ok();
+            }
+            return Err(Box::new(error));
+        }
+    };
     let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
     let streamable_http_service: StreamableHttpService<SystemMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
@@ -470,7 +525,25 @@ where
         );
 
     let listener =
-        tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
+        match tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                if let Some(tx) = ready_tx {
+                    tx.send(Err(format!("failed to bind MCP listener: {error}")))
+                        .ok();
+                }
+                return Err(Box::new(error));
+            }
+        };
+    let listen_addr = listener.local_addr()?;
+    tracing::info!("Listening on {}", listen_addr);
+    if let Some(tx) = ready_tx {
+        tx.send(Ok(crate::runtime_shared::StartupReady {
+            listen_addr: listen_addr.to_string(),
+            display_url: crate::runtime_shared::mcp_display_url(&config.host, config.port),
+        }))
+        .ok();
+    }
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown.await;
@@ -662,25 +735,4 @@ mod tests {
 
         assert!(text.contains(&oatmeal_cache_dir_text()), "text={text}");
     }
-}
-
-pub async fn run_mcp_stdio(
-    config: AppConfig,
-    page_agent_config: PageAgentConfig,
-) -> Result<i32, Box<dyn std::error::Error>> {
-    let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
-    let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
-    let server = SystemMcpServer::new(binary_path, page_agent_config, resource_store);
-
-    let transport = stdio();
-    let service = server
-        .serve(transport)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-    service
-        .waiting()
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-
-    Ok(0)
 }

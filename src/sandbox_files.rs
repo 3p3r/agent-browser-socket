@@ -99,6 +99,7 @@ pub fn prepare_sandbox_files<'a>(
     let mut prepared = Vec::new();
 
     for file in files {
+        let _ = &file.origin;
         let Some(relative_path) = sandbox_path_to_relative(file.path.as_path(), root) else {
             continue;
         };
