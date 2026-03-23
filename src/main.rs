@@ -374,8 +374,12 @@ fn main() {
     let mut shutdown_tx = Some(shutdown_tx);
 
     #[cfg(target_os = "linux")]
-    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        eprintln!("oatmeal: no graphical display detected (DISPLAY and WAYLAND_DISPLAY are unset)");
+    if is_wsl::is_wsl()
+        || (std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none())
+    {
+        eprintln!(
+            "Oatmeal requires a native Linux graphical session (not WSL, and DISPLAY or WAYLAND_DISPLAY must be set)"
+        );
         request_shutdown(&mut shutdown_tx);
         std::process::exit(1);
     }
