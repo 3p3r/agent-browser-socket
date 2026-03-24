@@ -43,6 +43,7 @@ tray-icon = "0.21"
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
 notify-rust = "4"
+open = "5"
 
 [build-dependencies]
 flate2 = "1"
@@ -58,6 +59,7 @@ once_cell = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 mslnk = "0.1"
+windows-sys = { version = "0.60", features = ["Win32_System_Console"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 is-wsl = "0.4"

@@ -26,7 +26,7 @@ static LOGO_PNG: &[u8] = include_bytes!("../logo.png");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayAction {
-    OpenLogs,
+    OpenCacheDir,
     CleanCache,
     Shutdown,
 }
@@ -39,7 +39,7 @@ struct TrayMenuEntry {
 }
 
 struct TrayMenuHandles {
-    open_logs: tray_icon::menu::MenuItem,
+    open_cache_dir: tray_icon::menu::MenuItem,
     clean_cache: tray_icon::menu::MenuItem,
     shutdown: tray_icon::menu::MenuItem,
 }
@@ -64,9 +64,9 @@ fn tray_menu_entries(listen_addr: &str) -> Vec<TrayMenuEntry> {
             action: None,
         },
         TrayMenuEntry {
-            label: "Open Logs".to_string(),
+            label: "Open Cache Dir".to_string(),
             enabled: true,
-            action: Some(TrayAction::OpenLogs),
+            action: Some(TrayAction::OpenCacheDir),
         },
         TrayMenuEntry {
             label: "Clean Cache".to_string(),
@@ -93,7 +93,7 @@ fn build_tray_menu(listen_addr: &str) -> Result<(tray_icon::menu::Menu, TrayMenu
         .ok_or_else(|| "tray menu listening entry is missing".to_string())?;
     let version = tray_icon::menu::MenuItem::new(&version_label, false, None);
     let listening = tray_icon::menu::MenuItem::new(&listen_label, false, None);
-    let open_logs = tray_icon::menu::MenuItem::new("Open Logs", true, None);
+    let open_cache_dir = tray_icon::menu::MenuItem::new("Open Cache Dir", true, None);
     let clean_cache = tray_icon::menu::MenuItem::new("Clean Cache", true, None);
     let shutdown = tray_icon::menu::MenuItem::new("Shutdown", true, None);
 
@@ -102,8 +102,8 @@ fn build_tray_menu(listen_addr: &str) -> Result<(tray_icon::menu::Menu, TrayMenu
         .map_err(|error| format!("tray menu append failed for version label: {error}"))?;
     menu.append(&listening)
         .map_err(|error| format!("tray menu append failed for listening label: {error}"))?;
-    menu.append(&open_logs)
-        .map_err(|error| format!("tray menu append failed for open logs: {error}"))?;
+    menu.append(&open_cache_dir)
+        .map_err(|error| format!("tray menu append failed for open cache dir: {error}"))?;
     menu.append(&clean_cache)
         .map_err(|error| format!("tray menu append failed for clean cache: {error}"))?;
     menu.append(&shutdown)
@@ -112,7 +112,7 @@ fn build_tray_menu(listen_addr: &str) -> Result<(tray_icon::menu::Menu, TrayMenu
     Ok((
         menu,
         TrayMenuHandles {
-            open_logs,
+            open_cache_dir,
             clean_cache,
             shutdown,
         },
@@ -128,10 +128,8 @@ fn request_shutdown(shutdown_tx: &mut Option<tokio::sync::oneshot::Sender<()>>) 
 
 fn dispatch_tray_action(action: TrayAction) -> Result<(), String> {
     match action {
-        TrayAction::OpenLogs => {
-            let logs_dir = logging::oatmeal_logs_dir();
-            desktop::open_in_file_manager(&logs_dir)
-        }
+        TrayAction::OpenCacheDir => open::that(runtime_shared::oatmeal_cache_dir())
+            .map_err(|error| format!("failed to open cache directory: {error}")),
         TrayAction::CleanCache => {
             let cleaned = embedded_binary::clean_cached_binary()
                 .map_err(|error| format!("failed to clean cache: {error}"))?;
@@ -223,10 +221,10 @@ fn maybe_handle_cli_passthrough() -> Option<i32> {
         };
 
         if !output.stdout.is_empty() {
-            print!("{}", String::from_utf8_lossy(&output.stdout));
+            emit_stdout(&String::from_utf8_lossy(&output.stdout));
         }
         if !output.stderr.is_empty() {
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            emit_stderr(&String::from_utf8_lossy(&output.stderr));
         }
 
         return Some(output.status.code().unwrap_or(1));
@@ -237,11 +235,50 @@ fn maybe_handle_cli_passthrough() -> Option<i32> {
             .iter()
             .all(|arg| arg == "--version" || arg == "-V" || arg == "version");
     if is_version_only {
-        println!("{}", runtime_shared::oatmeal_version_text());
+        emit_stdout(&format!("{}\n", runtime_shared::oatmeal_version_text()));
         return Some(0);
     }
 
     None
+}
+
+fn emit_stdout(message: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        write_windows_console(message);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        print!("{}", message);
+    }
+}
+
+fn emit_stderr(message: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        write_windows_console(message);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        eprint!("{}", message);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn write_windows_console(message: &str) {
+    use std::io::Write;
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+
+    if let Ok(mut stream) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+        let _ = stream.write_all(message.as_bytes());
+        let _ = stream.flush();
+    }
 }
 
 struct WinitTrayApp {
@@ -259,8 +296,8 @@ impl WinitTrayApp {
         event: tray_icon::menu::MenuEvent,
         event_loop: &ActiveEventLoop,
     ) {
-        let action = if event.id == self.tray_items.open_logs.id() {
-            Some(TrayAction::OpenLogs)
+        let action = if event.id == self.tray_items.open_cache_dir.id() {
+            Some(TrayAction::OpenCacheDir)
         } else if event.id == self.tray_items.clean_cache.id() {
             Some(TrayAction::CleanCache)
         } else {
@@ -271,7 +308,7 @@ impl WinitTrayApp {
             if let Err(error) = dispatch_tray_action(action) {
                 tracing::error!(target: "oatmeal::tray", "tray action failed: {error}");
                 let action_name = match action {
-                    TrayAction::OpenLogs => "Open Logs",
+                    TrayAction::OpenCacheDir => "Open Cache Dir",
                     TrayAction::CleanCache => "Clean Cache",
                     TrayAction::Shutdown => "Shutdown",
                 };
@@ -542,7 +579,7 @@ mod tray_icon_tests {
             vec![
                 version_label.as_str(),
                 "Listening: 127.0.0.1:9607",
-                "Open Logs",
+                "Open Cache Dir",
                 "Clean Cache",
                 "Shutdown"
             ]
