@@ -38,6 +38,10 @@ struct Cli {
     #[arg(long)]
     port: Option<u16>,
 
+    /// Run a command instead of starting the MCP server
+    #[arg(long, num_args = 1..)]
+    command: Option<Vec<String>>,
+
     /// URI launch argument (oatmeal://...?host=X&port=Y)
     #[arg(hide = true, value_parser = parse_uri_argument)]
     uri: Option<String>,
@@ -184,6 +188,88 @@ fn load_tray_icon() -> Result<tray_icon::Icon, String> {
         .map_err(|error| format!("Icon::from_rgba failed: {error}"))
 }
 
+fn emit_stdout(message: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        write_windows_console(message);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        print!("{}", message);
+    }
+}
+
+fn emit_stderr(message: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        write_windows_console(message);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        eprint!("{}", message);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn write_windows_console(message: &str) {
+    use std::io::Write;
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+
+    if let Ok(mut stream) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+        let _ = stream.write_all(message.as_bytes());
+        let _ = stream.flush();
+    }
+}
+
+fn maybe_handle_command_passthrough(command_args: &[String]) -> i32 {
+    if command_args.is_empty() {
+        emit_stderr("oatmeal: --command requires a command payload\n");
+        return 2;
+    }
+
+    let executable = &command_args[0];
+    let args = &command_args[1..];
+    if executable != "agent-browser" && executable != "ab" {
+        emit_stderr("oatmeal: --command currently supports agent-browser/ab passthrough only\n");
+        return 2;
+    }
+
+    let binary_path = match embedded_binary::resolve_binary_path(None) {
+        Ok(path) => path,
+        Err(error) => {
+            emit_stderr(&format!(
+                "oatmeal: failed to resolve embedded browser binary: {error}\n"
+            ));
+            return 1;
+        }
+    };
+
+    let output = match std::process::Command::new(binary_path).args(args).output() {
+        Ok(output) => output,
+        Err(error) => {
+            emit_stderr(&format!(
+                "oatmeal: failed to execute embedded browser binary: {error}\n"
+            ));
+            return 1;
+        }
+    };
+
+    if !output.stdout.is_empty() {
+        emit_stdout(&String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        emit_stderr(&String::from_utf8_lossy(&output.stderr));
+    }
+
+    output.status.code().unwrap_or(1)
+}
+
 fn apply_uri_overrides(config: &mut configuration::AppConfig, uri: &str) -> Result<(), String> {
     let parsed = Url::parse(uri).map_err(|error| format!("invalid URI launch payload: {error}"))?;
 
@@ -293,7 +379,19 @@ impl ApplicationHandler<TrayLoopEvent> for WinitTrayApp {
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+
     let cli = Cli::parse();
+
+    if let Some(ref command_args) = cli.command {
+        std::process::exit(maybe_handle_command_passthrough(command_args));
+    }
 
     let _log_handle = match logging::init_file_logging() {
         Ok(handle) => handle,
