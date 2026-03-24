@@ -16,11 +16,37 @@ mod sandbox_files;
 mod screenshot;
 mod server;
 
+use clap::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use url::Url;
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+
+#[derive(Parser)]
+#[command(name = "oatmeal", version, about = "System tray MCP server with browser automation")]
+struct Cli {
+    /// Override the bind address (e.g. 127.0.0.1)
+    #[arg(long)]
+    host: Option<String>,
+
+    /// Override the listen port (e.g. 9607)
+    #[arg(long)]
+    port: Option<u16>,
+
+    /// URI launch argument (oatmeal://...?host=X&port=Y)
+    #[arg(hide = true, value_parser = parse_uri_argument)]
+    uri: Option<String>,
+}
+
+fn parse_uri_argument(s: &str) -> Result<String, String> {
+    let trimmed = s.trim_matches('"');
+    if trimmed.starts_with(&format!("{}://", server::URI_SCHEME.unsecure())) {
+        Ok(trimmed.to_string())
+    } else {
+        Err(format!("not an oatmeal URI: {s}"))
+    }
+}
 
 static LOGO_PNG: &[u8] = include_bytes!("../logo.png");
 
@@ -154,13 +180,6 @@ fn load_tray_icon() -> Result<tray_icon::Icon, String> {
         .map_err(|error| format!("Icon::from_rgba failed: {error}"))
 }
 
-fn launched_uri_argument() -> Option<String> {
-    std::env::args_os()
-        .skip(1)
-        .map(|arg| arg.to_string_lossy().trim_matches('"').to_string())
-        .find(|arg| arg.starts_with(&format!("{}://", server::URI_SCHEME.unsecure())))
-}
-
 fn apply_uri_overrides(config: &mut configuration::AppConfig, uri: &str) -> Result<(), String> {
     let parsed = Url::parse(uri).map_err(|error| format!("invalid URI launch payload: {error}"))?;
 
@@ -182,103 +201,6 @@ fn apply_uri_overrides(config: &mut configuration::AppConfig, uri: &str) -> Resu
     }
 
     Ok(())
-}
-
-fn maybe_handle_cli_passthrough() -> Option<i32> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    if let Some(command_index) = args.iter().position(|arg| arg == "--command") {
-        let command = args.get(command_index + 1..).unwrap_or(&[]);
-        if command.is_empty() {
-            eprintln!("oatmeal: --command requires a command payload");
-            return Some(2);
-        }
-
-        let executable = &command[0];
-        let command_args = &command[1..];
-        if executable != "agent-browser" && executable != "ab" {
-            eprintln!("oatmeal: --command currently supports agent-browser/ab passthrough only");
-            return Some(2);
-        }
-
-        let binary_path = match embedded_binary::resolve_binary_path(None) {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("oatmeal: failed to resolve embedded browser binary: {error}");
-                return Some(1);
-            }
-        };
-
-        let output = match std::process::Command::new(binary_path)
-            .args(command_args)
-            .output()
-        {
-            Ok(output) => output,
-            Err(error) => {
-                eprintln!("oatmeal: failed to execute embedded browser binary: {error}");
-                return Some(1);
-            }
-        };
-
-        if !output.stdout.is_empty() {
-            emit_stdout(&String::from_utf8_lossy(&output.stdout));
-        }
-        if !output.stderr.is_empty() {
-            emit_stderr(&String::from_utf8_lossy(&output.stderr));
-        }
-
-        return Some(output.status.code().unwrap_or(1));
-    }
-
-    let is_version_only = !args.is_empty()
-        && args
-            .iter()
-            .all(|arg| arg == "--version" || arg == "-V" || arg == "version");
-    if is_version_only {
-        emit_stdout(&format!("{}\n", runtime_shared::oatmeal_version_text()));
-        return Some(0);
-    }
-
-    None
-}
-
-fn emit_stdout(message: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        write_windows_console(message);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        print!("{}", message);
-    }
-}
-
-fn emit_stderr(message: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        write_windows_console(message);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        eprint!("{}", message);
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn write_windows_console(message: &str) {
-    use std::io::Write;
-    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-
-    unsafe {
-        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
-    }
-
-    if let Ok(mut stream) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
-        let _ = stream.write_all(message.as_bytes());
-        let _ = stream.flush();
-    }
 }
 
 struct WinitTrayApp {
@@ -367,9 +289,7 @@ impl ApplicationHandler<TrayLoopEvent> for WinitTrayApp {
 }
 
 fn main() {
-    if let Some(code) = maybe_handle_cli_passthrough() {
-        std::process::exit(code);
-    }
+    let cli = Cli::parse();
 
     let _log_handle = match logging::init_file_logging() {
         Ok(handle) => handle,
@@ -387,11 +307,18 @@ fn main() {
         }
     };
 
-    if let Some(uri) = launched_uri_argument() {
-        if let Err(error) = apply_uri_overrides(&mut config, &uri) {
+    if let Some(ref uri) = cli.uri {
+        if let Err(error) = apply_uri_overrides(&mut config, uri) {
             tracing::error!(target: "oatmeal::startup", "URI launch parse failed: {error}");
             std::process::exit(1);
         }
+    }
+
+    if let Some(host) = cli.host {
+        config.host = host;
+    }
+    if let Some(port) = cli.port {
+        config.port = port;
     }
 
     let page_agent_config = config.page_agent.clone();
