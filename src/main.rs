@@ -85,6 +85,8 @@ static LOGO_PNG: &[u8] = include_bytes!("../logo.png");
 enum TrayAction {
     OpenCacheDir,
     CleanCache,
+    RegisterUri,
+    UnregisterUri,
     Shutdown,
 }
 
@@ -98,6 +100,8 @@ struct TrayMenuEntry {
 struct TrayMenuHandles {
     open_cache_dir: tray_icon::menu::MenuItem,
     clean_cache: tray_icon::menu::MenuItem,
+    register_uri: tray_icon::menu::MenuItem,
+    unregister_uri: tray_icon::menu::MenuItem,
     shutdown: tray_icon::menu::MenuItem,
 }
 
@@ -131,6 +135,16 @@ fn tray_menu_entries(listen_addr: &str) -> Vec<TrayMenuEntry> {
             action: Some(TrayAction::CleanCache),
         },
         TrayMenuEntry {
+            label: "Register URI Scheme".to_string(),
+            enabled: true,
+            action: Some(TrayAction::RegisterUri),
+        },
+        TrayMenuEntry {
+            label: "Unregister URI Scheme".to_string(),
+            enabled: true,
+            action: Some(TrayAction::UnregisterUri),
+        },
+        TrayMenuEntry {
             label: "Shutdown".to_string(),
             enabled: true,
             action: Some(TrayAction::Shutdown),
@@ -152,6 +166,8 @@ fn build_tray_menu(listen_addr: &str) -> Result<(tray_icon::menu::Menu, TrayMenu
     let listening = tray_icon::menu::MenuItem::new(&listen_label, false, None);
     let open_cache_dir = tray_icon::menu::MenuItem::new("Open Cache Dir", true, None);
     let clean_cache = tray_icon::menu::MenuItem::new("Clean Cache", true, None);
+    let register_uri = tray_icon::menu::MenuItem::new("Register URI Scheme", true, None);
+    let unregister_uri = tray_icon::menu::MenuItem::new("Unregister URI Scheme", true, None);
     let shutdown = tray_icon::menu::MenuItem::new("Shutdown", true, None);
 
     let menu = tray_icon::menu::Menu::new();
@@ -163,6 +179,10 @@ fn build_tray_menu(listen_addr: &str) -> Result<(tray_icon::menu::Menu, TrayMenu
         .map_err(|error| format!("tray menu append failed for open cache dir: {error}"))?;
     menu.append(&clean_cache)
         .map_err(|error| format!("tray menu append failed for clean cache: {error}"))?;
+    menu.append(&register_uri)
+        .map_err(|error| format!("tray menu append failed for register uri: {error}"))?;
+    menu.append(&unregister_uri)
+        .map_err(|error| format!("tray menu append failed for unregister uri: {error}"))?;
     menu.append(&shutdown)
         .map_err(|error| format!("tray menu append failed for shutdown: {error}"))?;
 
@@ -171,6 +191,8 @@ fn build_tray_menu(listen_addr: &str) -> Result<(tray_icon::menu::Menu, TrayMenu
         TrayMenuHandles {
             open_cache_dir,
             clean_cache,
+            register_uri,
+            unregister_uri,
             shutdown,
         },
     ))
@@ -198,6 +220,33 @@ fn dispatch_tray_action(action: TrayAction) -> Result<(), String> {
             desktop::show_notification("Browser cache cleaned", body)
                 .map_err(|error| format!("cache clean notification failed: {error}"))
         }
+        TrayAction::RegisterUri => match app::ensure_uri_scheme_registered() {
+            Ok(()) => desktop::show_notification(
+                "URI Scheme Registered",
+                &format!("{}:// URI scheme registered", server::URI_SCHEME.unsecure()),
+            )
+            .map_err(|error| format!("register uri notification failed: {error}")),
+            Err(error) => Err(format!("failed to register URI scheme: {error}")),
+        },
+        TrayAction::UnregisterUri => match server::unregister_uri_scheme() {
+            Ok(true) => desktop::show_notification(
+                "URI Scheme Unregistered",
+                &format!(
+                    "{}:// URI scheme unregistered",
+                    server::URI_SCHEME.unsecure()
+                ),
+            )
+            .map_err(|error| format!("unregister uri notification failed: {error}")),
+            Ok(false) => desktop::show_notification(
+                "URI Scheme",
+                &format!(
+                    "{}:// URI scheme was not registered",
+                    server::URI_SCHEME.unsecure()
+                ),
+            )
+            .map_err(|error| format!("unregister uri notification failed: {error}")),
+            Err(error) => Err(format!("failed to unregister URI scheme: {error}")),
+        },
         TrayAction::Shutdown => Ok(()),
     }
 }
@@ -492,6 +541,10 @@ impl WinitTrayApp {
             Some(TrayAction::OpenCacheDir)
         } else if event.id == self.tray_items.clean_cache.id() {
             Some(TrayAction::CleanCache)
+        } else if event.id == self.tray_items.register_uri.id() {
+            Some(TrayAction::RegisterUri)
+        } else if event.id == self.tray_items.unregister_uri.id() {
+            Some(TrayAction::UnregisterUri)
         } else {
             None
         };
@@ -502,6 +555,8 @@ impl WinitTrayApp {
                 let action_name = match action {
                     TrayAction::OpenCacheDir => "Open Cache Dir",
                     TrayAction::CleanCache => "Clean Cache",
+                    TrayAction::RegisterUri => "Register URI Scheme",
+                    TrayAction::UnregisterUri => "Unregister URI Scheme",
                     TrayAction::Shutdown => "Shutdown",
                 };
                 if let Err(notify_error) = desktop::action_failure_notification(action_name, &error)

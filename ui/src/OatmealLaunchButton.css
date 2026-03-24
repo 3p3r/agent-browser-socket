@@ -1,0 +1,73 @@
+/* ── Tokens ──────────────────────────────────────────────────────────────── */
+.oatmeal-btn {
+  --oatmeal-accent: #4a7af5;
+  --oatmeal-accent-hover: #3a6ae5;
+  --oatmeal-success: #2da44e;
+  --oatmeal-error: #d73a49;
+  --oatmeal-error-hover: #c7303d;
+  --oatmeal-radius: 8px;
+  --oatmeal-font: inherit;
+}
+
+/* ── Button ──────────────────────────────────────────────────────────────── */
+.oatmeal-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border: none;
+  border-radius: var(--oatmeal-radius);
+  text-decoration: none;
+  background: var(--oatmeal-accent);
+  color: #fff;
+  font: 600 14px / 1 var(--oatmeal-font);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    opacity 0.15s ease;
+  user-select: none;
+}
+
+.oatmeal-btn:hover:not(:disabled) {
+  background: var(--oatmeal-accent-hover);
+}
+
+.oatmeal-btn:focus-visible {
+  outline: 2px solid var(--oatmeal-accent);
+  outline-offset: 3px;
+}
+
+.oatmeal-btn:disabled {
+  opacity: 0.85;
+  cursor: default;
+}
+
+.oatmeal-btn--connected {
+  background: var(--oatmeal-success);
+}
+
+.oatmeal-btn--error {
+  background: var(--oatmeal-error);
+}
+
+.oatmeal-btn--error:hover {
+  background: var(--oatmeal-error-hover);
+}
+
+/* ── Spinner ─────────────────────────────────────────────────────────────── */
+@keyframes oatmeal-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.oatmeal-spinner {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  border: 2.5px solid rgba(255 255 255 / 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: oatmeal-rotate 0.65s linear infinite;
+}

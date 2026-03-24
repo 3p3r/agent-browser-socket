@@ -1,0 +1,30 @@
+{
+  "name": "oatmeal-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/oatmeal-ui.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "dev": "storybook dev -p 6006",
+    "build": "vite build",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build",
+    "predev": "mkdir -p public && (test -L public/oatmeal || ln -sf ../../target/release/oatmeal public/oatmeal 2>/dev/null || true)"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@storybook/addon-essentials": "^8.4.2",
+    "@storybook/react": "^8.4.2",
+    "@storybook/react-vite": "^8.4.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "storybook": "^8.4.2",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.10"
+  }
+}

@@ -514,6 +514,7 @@ where
         );
 
     let app = Router::new()
+        .route("/health", get(health_handler).head(health_handler))
         .route("/", get(dashboard_handler))
         .route("/logo.png", get(logo_png_handler))
         .route("/logo.ico", get(logo_ico_handler))
@@ -563,6 +564,10 @@ where
         .await?;
 
     Ok(0)
+}
+
+async fn health_handler() -> StatusCode {
+    StatusCode::OK
 }
 
 async fn dashboard_handler() -> Html<&'static str> {

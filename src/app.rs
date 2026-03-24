@@ -13,19 +13,12 @@ fn register_uri_scheme() -> Result<(), Box<dyn Error>> {
 }
 
 pub fn ensure_uri_scheme_registered() -> Result<(), Box<dyn Error>> {
-    let was_registered = sysuri::is_registered(URI_SCHEME.unsecure())?;
-    if !was_registered {
-        register_uri_scheme()?;
-        return Ok(());
-    }
-
     if let Err(error) = register_uri_scheme() {
         tracing::warn!(
             target: "oatmeal::startup",
-            "URI scheme refresh skipped: {error}"
+            "URI scheme registration update failed: {error}"
         );
     }
-
     Ok(())
 }
 
