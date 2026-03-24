@@ -1,5 +1,3 @@
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-
 mod app;
 mod bashkit_executor;
 mod browser_detection;
@@ -16,7 +14,10 @@ mod sandbox_files;
 mod screenshot;
 mod server;
 
-use clap::Parser;
+use crate::command_runtime::{
+    execute_prepared_command, prepare_script_command, CommandExecutionMode,
+};
+use clap::{error::ErrorKind, Parser};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use url::Url;
@@ -39,8 +40,16 @@ struct Cli {
     port: Option<u16>,
 
     /// Run a command instead of starting the MCP server
-    #[arg(long, num_args = 1..)]
+    #[arg(long, num_args = 1.., allow_hyphen_values = true)]
     command: Option<Vec<String>>,
+
+    /// Register oatmeal:// URI scheme and exit
+    #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "unregister_uri")]
+    register_uri: bool,
+
+    /// Unregister oatmeal:// URI scheme and exit
+    #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "register_uri")]
+    unregister_uri: bool,
 
     /// URI launch argument (oatmeal://...?host=X&port=Y)
     #[arg(hide = true, value_parser = parse_uri_argument)]
@@ -189,41 +198,20 @@ fn load_tray_icon() -> Result<tray_icon::Icon, String> {
 }
 
 fn emit_stdout(message: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        write_windows_console(message);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        print!("{}", message);
+    use std::io::Write;
+    if !message.is_empty() {
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(message.as_bytes());
+        let _ = stdout.flush();
     }
 }
 
 fn emit_stderr(message: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        write_windows_console(message);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        eprint!("{}", message);
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn write_windows_console(message: &str) {
     use std::io::Write;
-    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-
-    unsafe {
-        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
-    }
-
-    if let Ok(mut stream) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
-        let _ = stream.write_all(message.as_bytes());
-        let _ = stream.flush();
+    if !message.is_empty() {
+        let mut stderr = std::io::stderr().lock();
+        let _ = stderr.write_all(message.as_bytes());
+        let _ = stderr.flush();
     }
 }
 
@@ -233,12 +221,22 @@ fn maybe_handle_command_passthrough(command_args: &[String]) -> i32 {
         return 2;
     }
 
-    let executable = &command_args[0];
-    let args = &command_args[1..];
-    if executable != "agent-browser" && executable != "ab" {
-        emit_stderr("oatmeal: --command currently supports agent-browser/ab passthrough only\n");
-        return 2;
-    }
+    let script = command_args.join(" ");
+    let prepared = match prepare_script_command(&script) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            emit_stderr(&format!("oatmeal: {error}\n"));
+            return 2;
+        }
+    };
+
+    let page_agent_config = match configuration::load_config() {
+        Ok(config) => config.page_agent,
+        Err(error) => {
+            emit_stderr(&format!("oatmeal: failed to load config: {error}\n"));
+            return 1;
+        }
+    };
 
     let binary_path = match embedded_binary::resolve_binary_path(None) {
         Ok(path) => path,
@@ -250,24 +248,113 @@ fn maybe_handle_command_passthrough(command_args: &[String]) -> i32 {
         }
     };
 
-    let output = match std::process::Command::new(binary_path).args(args).output() {
-        Ok(output) => output,
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
         Err(error) => {
             emit_stderr(&format!(
-                "oatmeal: failed to execute embedded browser binary: {error}\n"
+                "oatmeal: failed to build command runtime: {error}\n"
             ));
             return 1;
         }
     };
 
-    if !output.stdout.is_empty() {
-        emit_stdout(&String::from_utf8_lossy(&output.stdout));
+    let result = runtime.block_on(execute_prepared_command(
+        &binary_path,
+        &page_agent_config,
+        prepared,
+        None,
+        CommandExecutionMode::Mcp {
+            cache_root: embedded_binary::cache_root_dir(),
+        },
+    ));
+
+    if !result.execution.stdout.is_empty() {
+        emit_stdout(&result.execution.stdout);
     }
-    if !output.stderr.is_empty() {
-        emit_stderr(&String::from_utf8_lossy(&output.stderr));
+    if !result.execution.stderr.is_empty() {
+        emit_stderr(&result.execution.stderr);
     }
 
-    output.status.code().unwrap_or(1)
+    result.execution.exit_code
+}
+
+fn parse_cli_or_exit() -> Cli {
+    match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let mut message = error.to_string();
+            if !message.ends_with('\n') {
+                message.push('\n');
+            }
+
+            let code = match error.kind() {
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+                    emit_stdout(&message);
+                    0
+                }
+                _ => {
+                    emit_stderr(&message);
+                    2
+                }
+            };
+
+            std::process::exit(code);
+        }
+    }
+}
+
+fn maybe_handle_non_tray_cli_commands(cli: &Cli) -> Option<i32> {
+    if let Some(command_args) = cli.command.as_ref() {
+        return Some(maybe_handle_command_passthrough(command_args));
+    }
+
+    if cli.register_uri {
+        return Some(match app::ensure_uri_scheme_registered() {
+            Ok(()) => {
+                emit_stdout("oatmeal: URI scheme registered\n");
+                0
+            }
+            Err(error) => {
+                emit_stderr(&format!(
+                    "oatmeal: failed to register URI scheme: {error}\n"
+                ));
+                1
+            }
+        });
+    }
+
+    if cli.unregister_uri {
+        return Some(match server::unregister_uri_scheme() {
+            Ok(true) => {
+                emit_stdout("oatmeal: URI scheme unregistered\n");
+                0
+            }
+            Ok(false) => {
+                emit_stdout("oatmeal: URI scheme was not registered\n");
+                0
+            }
+            Err(error) => {
+                emit_stderr(&format!(
+                    "oatmeal: failed to unregister URI scheme: {error}\n"
+                ));
+                1
+            }
+        });
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn detach_console_for_tray_mode() {
+    use windows_sys::Win32::System::Console::FreeConsole;
+
+    unsafe {
+        let _ = FreeConsole();
+    }
 }
 
 fn apply_uri_overrides(config: &mut configuration::AppConfig, uri: &str) -> Result<(), String> {
@@ -379,19 +466,14 @@ impl ApplicationHandler<TrayLoopEvent> for WinitTrayApp {
 }
 
 fn main() {
+    let cli = parse_cli_or_exit();
+
+    if let Some(code) = maybe_handle_non_tray_cli_commands(&cli) {
+        std::process::exit(code);
+    }
+
     #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-        unsafe {
-            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
-        }
-    }
-
-    let cli = Cli::parse();
-
-    if let Some(ref command_args) = cli.command {
-        std::process::exit(maybe_handle_command_passthrough(command_args));
-    }
+    detach_console_for_tray_mode();
 
     let _log_handle = match logging::init_file_logging() {
         Ok(handle) => handle,
