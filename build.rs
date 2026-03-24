@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
-const VERSION: &str = "v0.21.4";
+const VERSION: &str = "v0.22.0";
 const SKILLS_ARCHIVE_URL: &str =
     "https://github.com/vercel-labs/agent-browser/archive/refs/heads/main.tar.gz";
 const SKILLS_ARCHIVE_PREFIX: &str = "/skills/agent-browser/";
