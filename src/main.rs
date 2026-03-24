@@ -17,6 +17,8 @@ mod server;
 use crate::command_runtime::{
     execute_prepared_command, prepare_script_command, CommandExecutionMode,
 };
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use clap::{error::ErrorKind, Parser};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -50,6 +52,18 @@ struct Cli {
     /// Unregister oatmeal:// URI scheme and exit
     #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "register_uri")]
     unregister_uri: bool,
+
+    /// Print version as JSON and exit
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    version_json: bool,
+
+    /// Print cache directory path as JSON and exit
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    cache_dir: bool,
+
+    /// Capture system screenshots to cache directory and print paths as JSON, then exit
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    screenshot: bool,
 
     /// URI launch argument (oatmeal://...?host=X&port=Y)
     #[arg(hide = true, value_parser = parse_uri_argument)]
@@ -215,6 +229,73 @@ fn emit_stderr(message: &str) {
     }
 }
 
+fn handle_version_json() -> i32 {
+    let payload = runtime_shared::oatmeal_version_payload();
+    emit_stdout(&format!(
+        "{}\n",
+        serde_json::to_string_pretty(&payload).unwrap_or_default()
+    ));
+    0
+}
+
+fn handle_cache_dir() -> i32 {
+    let payload = runtime_shared::oatmeal_cache_dir_payload();
+    emit_stdout(&format!(
+        "{}\n",
+        serde_json::to_string_pretty(&payload).unwrap_or_default()
+    ));
+    0
+}
+
+fn handle_screenshot() -> i32 {
+    let screenshots = match runtime_shared::capture_system_screenshots() {
+        Ok(s) => s,
+        Err(error) => {
+            emit_stderr(&format!("oatmeal: {error}\n"));
+            return 1;
+        }
+    };
+
+    let dir = runtime_shared::oatmeal_cache_dir().join("screenshots");
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        emit_stderr(&format!(
+            "oatmeal: failed to create screenshots directory: {error}\n"
+        ));
+        return 1;
+    }
+
+    let mut results = Vec::new();
+    for (index, s) in screenshots.iter().enumerate() {
+        let path = dir.join(format!("system-monitor-{index}.png"));
+        let data = match BASE64.decode(&s.png_base64) {
+            Ok(d) => d,
+            Err(error) => {
+                emit_stderr(&format!(
+                    "oatmeal: failed to decode screenshot data: {error}\n"
+                ));
+                return 1;
+            }
+        };
+        if let Err(error) = std::fs::write(&path, &data) {
+            emit_stderr(&format!("oatmeal: failed to write screenshot: {error}\n"));
+            return 1;
+        }
+        results.push(serde_json::json!({
+            "path": path.display().to_string(),
+            "width": s.width,
+            "height": s.height,
+            "monitor": s.monitor,
+        }));
+    }
+
+    let payload = serde_json::json!({ "screenshots": results });
+    emit_stdout(&format!(
+        "{}\n",
+        serde_json::to_string_pretty(&payload).unwrap_or_default()
+    ));
+    0
+}
+
 fn maybe_handle_command_passthrough(command_args: &[String]) -> i32 {
     if command_args.is_empty() {
         emit_stderr("oatmeal: --command requires a command payload\n");
@@ -307,6 +388,18 @@ fn parse_cli_or_exit() -> Cli {
 }
 
 fn maybe_handle_non_tray_cli_commands(cli: &Cli) -> Option<i32> {
+    if cli.version_json {
+        return Some(handle_version_json());
+    }
+
+    if cli.cache_dir {
+        return Some(handle_cache_dir());
+    }
+
+    if cli.screenshot {
+        return Some(handle_screenshot());
+    }
+
     if let Some(command_args) = cli.command.as_ref() {
         return Some(maybe_handle_command_passthrough(command_args));
     }

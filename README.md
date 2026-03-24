@@ -9,6 +9,7 @@ Oatmeal is a single binary tray application that extends your web agent's capabi
 - [Command Mode](#command-mode)
 - [Exporting Files from Command Mode](#exporting-files-from-command-mode)
 - [MCP Tools](#mcp-tools)
+- [CLI Equivalents](#cli-equivalents)
 - [URI Launch Mode](#uri-launch-mode)
 - [Platform Notes](#platform-notes)
 
@@ -133,6 +134,19 @@ User-facing behavior:
 - `cache_directory` returns the cache folder used by Oatmeal, agents can use this to pass to `agent-browser` for file downloads
 - `screenshot_system` captures all attached monitors as image resources
 - `delete_resource` and `delete_all_resources` clean up generated resources from the current server
+
+## CLI Equivalents
+
+Standalone CLI flags expose the same functionality as the corresponding MCP tools:
+
+| MCP Tool | CLI Flag | Output |
+|----------|----------|--------|
+| `version` | `--version-json` | `{"version": "X.Y.Z"}` |
+| `cache_directory` | `--cache-dir` | `{"cache_dir": "..."}` |
+| `screenshot_system` | `--screenshot` | saves PNGs to cache dir, prints paths as JSON |
+| `shell_command` | `--command` | stdout/stderr passthrough |
+| `uri_scheme register` | `--register-uri` | confirmation text |
+| `uri_scheme unregister` | `--unregister-uri` | confirmation text |
 
 ## URI Launch Mode
 
