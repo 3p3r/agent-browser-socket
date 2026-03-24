@@ -88,7 +88,11 @@ impl Builtin for AgentBrowserBuiltin {
         command
             .args(&command_args)
             .stdout(ProcessStdio::from(stdout_file))
-            .stderr(ProcessStdio::from(stderr_file));
+            .stderr(ProcessStdio::from(stderr_file))
+            .env("AGENT_BROWSER_SESSION", "safe");
+        if let Some(binary_dir) = self.binary_path.parent() {
+            command.env("AGENT_BROWSER_HOME", binary_dir);
+        }
 
         if ctx.stdin.is_some() {
             command.stdin(ProcessStdio::piped());

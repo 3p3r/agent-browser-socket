@@ -40,7 +40,13 @@ pub fn show_notification(title: &str, body: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         ensure_windows_notification_prerequisite()?;
-        Err("notification failed: Windows toast delivery not implemented in this phase".to_string())
+        notify_rust::Notification::new()
+            .summary(title)
+            .body(body)
+            .appname(WINDOWS_APP_USER_MODEL_ID)
+            .show()
+            .map(|_| ())
+            .map_err(|error| format!("notification failed: {error}"))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
