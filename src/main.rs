@@ -24,7 +24,11 @@ use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 
 #[derive(Parser)]
-#[command(name = "oatmeal", version, about = "System tray MCP server with browser automation")]
+#[command(
+    name = "oatmeal",
+    version,
+    about = "System tray MCP server with browser automation"
+)]
 struct Cli {
     /// Override the bind address (e.g. 127.0.0.1)
     #[arg(long)]

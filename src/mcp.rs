@@ -225,6 +225,7 @@ impl SystemMcpServer {
         Ok(CallToolResult::success(contents))
     }
 
+    /// Timeouts: shell 5min, page-agent injection 2min, prompt 1min. Exit code 124 = timeout.
     #[tool(
         name = "shell_command",
         description = "Execute a sandboxed shell script with agent-browser available and return output plus generated resources"
