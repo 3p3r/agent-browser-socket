@@ -26,7 +26,7 @@ pub fn build_file_logging_config(
     let trigger = SizeTrigger::new(max_size_bytes);
     let roller = FixedWindowRoller::builder()
         .base(1)
-        .build(&archive_pattern, archive_count)?;
+        .build(archive_pattern, archive_count)?;
     let policy = CompoundPolicy::new(Box::new(trigger), Box::new(roller));
 
     let logfile = RollingFileAppender::builder()

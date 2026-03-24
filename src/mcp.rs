@@ -427,6 +427,7 @@ impl ServerHandler for SystemMcpServer {
             )
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -454,6 +455,7 @@ impl ServerHandler for SystemMcpServer {
         }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn read_resource(
         &self,
         request: ReadResourceRequestParams,

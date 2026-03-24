@@ -398,8 +398,8 @@ This server supports two synthetic commands in the MCP `shell_command` tool.
 }
 
 fn prepare_sanitized_page_agent_bundle(
-    source_file: &PathBuf,
-    out_dir: &PathBuf,
+    source_file: &Path,
+    out_dir: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let source = fs::read_to_string(source_file)?;
     let sanitized = replace_js_string_constant(&source, "DEMO_BASE_URL", "about:blank");

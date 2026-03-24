@@ -185,8 +185,8 @@ impl BashkitExecutor {
         let pre_existing: HashSet<PathBuf> = command
             .referenced_paths
             .iter()
-            .cloned()
             .filter(|p| p.exists())
+            .cloned()
             .collect();
 
         let mut builder = Bash::builder().python().builtin(

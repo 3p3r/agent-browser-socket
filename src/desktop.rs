@@ -8,6 +8,7 @@ const WINDOWS_APP_USER_MODEL_ID: &str = "com.everruns.oatmeal";
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_START_MENU_SHORTCUT: &str = "Oatmeal.lnk";
 
+#[allow(dead_code)]
 pub fn open_in_file_manager(path: &Path) -> Result<(), String> {
     let (command, args) = open_in_file_manager_command(path);
     let status = Command::new(&command)
@@ -57,6 +58,7 @@ pub fn action_failure_notification(action_name: &str, error: &str) -> Result<(),
     )
 }
 
+#[allow(dead_code)]
 pub fn open_in_file_manager_command(path: &Path) -> (String, Vec<String>) {
     let target = path.display().to_string();
 
