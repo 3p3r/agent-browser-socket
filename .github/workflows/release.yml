@@ -240,6 +240,12 @@ jobs:
           name: universal-binaries
           path: bin/
 
+      - name: Install Linux runtime dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-0 libxdo3
+
       - name: Make binary executable
         if: runner.os != 'Windows'
         run: chmod +x bin/${{ matrix.binary }}
