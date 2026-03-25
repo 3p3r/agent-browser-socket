@@ -61,6 +61,10 @@ struct Cli {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     cache_dir: bool,
 
+    /// Print runtime diagnostics as JSON and exit
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    diagnostics: bool,
+
     /// Capture system screenshots to cache directory and print paths as JSON, then exit
     #[arg(long, action = clap::ArgAction::SetTrue)]
     screenshot: bool,
@@ -296,6 +300,15 @@ fn handle_cache_dir() -> i32 {
     0
 }
 
+fn handle_diagnostics() -> i32 {
+    let payload = runtime_shared::diagnostics_payload();
+    emit_stdout(&format!(
+        "{}\n",
+        serde_json::to_string_pretty(&payload).unwrap_or_default()
+    ));
+    0
+}
+
 fn handle_screenshot() -> i32 {
     let screenshots = match runtime_shared::capture_system_screenshots() {
         Ok(s) => s,
@@ -443,6 +456,10 @@ fn maybe_handle_non_tray_cli_commands(cli: &Cli) -> Option<i32> {
 
     if cli.cache_dir {
         return Some(handle_cache_dir());
+    }
+
+    if cli.diagnostics {
+        return Some(handle_diagnostics());
     }
 
     if cli.screenshot {

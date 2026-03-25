@@ -100,6 +100,12 @@ pub struct DeleteAllResourcesInput {}
 pub struct CacheDirectoryInput {}
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(
+    description = "Return runtime diagnostics for debugging browser selection and command routing issues."
+)]
+pub struct DiagnosticsInput {}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[schemars(description = "Register or unregister the oatmeal:// URI scheme handler.")]
 pub struct UriSchemeInput {
     pub action: String,
@@ -189,6 +195,20 @@ impl SystemMcpServer {
     }
 
     #[tool(
+        name = "diagnostics",
+        description = "Return runtime diagnostics for debugging browser selection and command routing"
+    )]
+    async fn diagnostics(
+        &self,
+        Parameters(_input): Parameters<DiagnosticsInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let payload = crate::runtime_shared::diagnostics_payload();
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
         name = "screenshot_system",
         description = "Capture screenshots of all attached system monitors and expose them as resources"
     )]
@@ -234,8 +254,22 @@ impl SystemMcpServer {
         &self,
         Parameters(input): Parameters<ShellCommandInput>,
     ) -> Result<CallToolResult, McpError> {
+        tracing::debug!(
+            target: "oatmeal::mcp",
+            "shell_command called with: {:?}",
+            input.command
+        );
+
         let prepared = prepare_script_command(&input.command)
             .map_err(|msg| McpError::invalid_params(msg, None))?;
+
+        tracing::debug!(
+            target: "oatmeal::mcp",
+            "prepared script: {:?}, should_inject: {}, agentic_prompt: {:?}",
+            prepared.script,
+            prepared.should_inject_page_agent,
+            prepared.agentic_prompt
+        );
 
         let result = execute_prepared_command(
             &self.binary_path,
@@ -487,7 +521,7 @@ pub async fn run_mcp_streamable_http<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let binary_path = match resolve_binary_path(config.browser_path.as_deref()) {
+    let binary_path = match resolve_binary_path(None) {
         Ok(path) => path,
         Err(error) => {
             if let Some(tx) = ready_tx {

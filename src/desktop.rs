@@ -11,8 +11,14 @@ const WINDOWS_START_MENU_SHORTCUT: &str = "Oatmeal.lnk";
 #[allow(dead_code)]
 pub fn open_in_file_manager(path: &Path) -> Result<(), String> {
     let (command, args) = open_in_file_manager_command(path);
-    let status = Command::new(&command)
-        .args(&args)
+    let mut cmd = Command::new(&command);
+    cmd.args(&args);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let status = cmd
         .status()
         .map_err(|error| format!("failed to launch file manager with {command}: {error}"))?;
 
