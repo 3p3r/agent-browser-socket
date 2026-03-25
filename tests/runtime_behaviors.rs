@@ -1,5 +1,3 @@
-#[path = "../src/auth.rs"]
-mod auth;
 #[path = "../src/browser_detection.rs"]
 mod browser_detection;
 #[path = "../src/configuration.rs"]
@@ -7,16 +5,10 @@ mod configuration;
 #[path = "../src/embedded_binary.rs"]
 mod embedded_binary;
 
-use axum::http::StatusCode;
-use axum::routing::get;
-use axum::Router;
 use once_cell::sync::Lazy;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::sync::Mutex;
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
 
 static PROCESS_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -88,36 +80,6 @@ impl Drop for DirGuard {
     }
 }
 
-fn reset_test_artifact_dir(test_name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("artifacts")
-        .join("runtime-behaviors")
-        .join(test_name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create test artifact dir");
-    dir
-}
-
-fn create_temp_test_dir(name: &str) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("oatmeal-{name}-{unique}"));
-    std::fs::create_dir_all(&dir).expect("create temp test dir");
-    dir
-}
-
-fn mirrored_export_path(base: &Path, source: &Path) -> PathBuf {
-    let mut relative = PathBuf::new();
-    for component in source.components() {
-        if let std::path::Component::Normal(part) = component {
-            relative.push(part);
-        }
-    }
-    base.join(relative)
-}
-
 fn clear_oatmeal_env() {
     let keys: Vec<String> = std::env::vars()
         .filter_map(|(key, _)| {
@@ -132,140 +94,6 @@ fn clear_oatmeal_env() {
     for key in keys {
         std::env::remove_var(key);
     }
-}
-
-fn require_detected_browser() -> PathBuf {
-    browser_detection::find_chrome_browser().expect("expected a detected Chrome-like browser")
-}
-
-fn resolve_wrapper_executable() -> PathBuf {
-    let mut path = std::env::current_exe().expect("current exe path");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-
-    let exe_name = if cfg!(windows) {
-        "oatmeal.exe"
-    } else {
-        "oatmeal"
-    };
-    let candidate = path.join(exe_name);
-
-    if candidate.exists() {
-        return candidate;
-    }
-
-    let status = Command::new("cargo")
-        .args(["build"])
-        .status()
-        .expect("run cargo build for wrapper binary");
-    assert!(
-        status.success(),
-        "cargo build failed while preparing wrapper executable"
-    );
-
-    assert!(
-        candidate.exists(),
-        "wrapper executable not found at {}",
-        candidate.display()
-    );
-    candidate
-}
-
-#[tokio::test]
-async fn auth_check_skips_when_none_or_whitespace_url() {
-    let client = reqwest::Client::new();
-
-    let result_none = auth::check_auth(&client, None, None, None).await;
-    assert!(result_none.is_ok());
-
-    let result_blank = auth::check_auth(&client, Some("   "), None, None).await;
-    assert!(result_blank.is_ok());
-}
-
-#[tokio::test]
-async fn auth_check_handles_unreachable_endpoint_as_500() {
-    let client = reqwest::Client::new();
-    let result = auth::check_auth(&client, Some("http://127.0.0.1:1/auth"), None, None).await;
-    assert_eq!(result, Err(StatusCode::INTERNAL_SERVER_ERROR));
-}
-
-#[tokio::test]
-async fn auth_check_maps_status_codes() {
-    async fn status_200() -> StatusCode {
-        StatusCode::OK
-    }
-    async fn status_401() -> StatusCode {
-        StatusCode::UNAUTHORIZED
-    }
-    async fn status_403() -> StatusCode {
-        StatusCode::FORBIDDEN
-    }
-    async fn status_500() -> StatusCode {
-        StatusCode::INTERNAL_SERVER_ERROR
-    }
-
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind auth test server");
-    let port = listener.local_addr().expect("local addr").port();
-
-    let app = Router::new()
-        .route("/ok", get(status_200))
-        .route("/unauth", get(status_401))
-        .route("/forbidden", get(status_403))
-        .route("/err", get(status_500));
-
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-            })
-            .await;
-    });
-
-    let client = reqwest::Client::new();
-
-    let ok = auth::check_auth(
-        &client,
-        Some(&format!("http://127.0.0.1:{port}/ok")),
-        None,
-        None,
-    )
-    .await;
-    assert!(ok.is_ok());
-
-    let unauth = auth::check_auth(
-        &client,
-        Some(&format!("http://127.0.0.1:{port}/unauth")),
-        Some("Bearer abc"),
-        Some("sid=1"),
-    )
-    .await;
-    assert_eq!(unauth, Err(StatusCode::UNAUTHORIZED));
-
-    let forbidden = auth::check_auth(
-        &client,
-        Some(&format!("http://127.0.0.1:{port}/forbidden")),
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(forbidden, Err(StatusCode::FORBIDDEN));
-
-    let err = auth::check_auth(
-        &client,
-        Some(&format!("http://127.0.0.1:{port}/err")),
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(err, Err(StatusCode::INTERNAL_SERVER_ERROR));
-
-    let _ = shutdown_tx.send(());
-    let _ = handle.await;
 }
 
 #[test]
@@ -286,8 +114,6 @@ fn configuration_uses_embedded_defaults_when_no_sources_exist() {
     let cfg = configuration::load_config().expect("load config defaults");
     assert_eq!(cfg.port, 9607);
     assert_eq!(cfg.host, "0.0.0.0");
-    assert!(cfg.auth_url.is_none());
-    assert!(cfg.browser_path.is_none());
     assert_eq!(cfg.page_agent.model, "qwen3.5-plus");
     assert_eq!(cfg.page_agent.url, "http://localhost:11434/v1");
     assert_eq!(cfg.page_agent.key, "NA");
@@ -365,114 +191,6 @@ fn configuration_page_agent_env_overrides_file() {
     assert_eq!(cfg.page_agent.model, "env-model");
     assert_eq!(cfg.page_agent.url, "http://env.local/v1");
     assert_eq!(cfg.page_agent.key, "env-key");
-
-    clear_oatmeal_env();
-}
-
-#[test]
-fn cli_version_and_command_paths_work() {
-    let _guard = lock_env();
-    clear_oatmeal_env();
-
-    let clean_home = create_clean_home();
-    let _home_guard = EnvVarGuard::set("HOME", clean_home.as_os_str());
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
-    let working_dir = std::env::temp_dir().join(format!("oatmeal-cli-cwd-{unique}"));
-    std::fs::create_dir_all(&working_dir).expect("create cli cwd");
-    let _cwd = DirGuard::enter(&working_dir);
-
-    let exe = resolve_wrapper_executable();
-
-    let version_output = Command::new(&exe)
-        .arg("--version")
-        .output()
-        .expect("run --version");
-    assert!(version_output.status.success());
-    let version_stdout = String::from_utf8_lossy(&version_output.stdout);
-    assert!(version_stdout.contains("oatmeal"));
-
-    let missing_command_output = Command::new(&exe)
-        .arg("--command")
-        .output()
-        .expect("run --command without args");
-    assert_eq!(missing_command_output.status.code(), Some(2));
-    let missing_stderr = String::from_utf8_lossy(&missing_command_output.stderr);
-    assert!(missing_stderr.contains("missing forwarded arguments"));
-
-    let browser_path = require_detected_browser();
-
-    let passthrough_output = Command::new(&exe)
-        .env("AGENT_BROWSER_EXECUTABLE_PATH", browser_path.as_os_str())
-        .args(["--verbose", "--command", "agent-browser", "--version"])
-        .output()
-        .expect("run passthrough command");
-    assert!(
-        passthrough_output.status.success(),
-        "passthrough failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&passthrough_output.stdout),
-        String::from_utf8_lossy(&passthrough_output.stderr)
-    );
-    let passthrough_stdout = String::from_utf8_lossy(&passthrough_output.stdout);
-    assert!(passthrough_stdout.contains("agent-browser"));
-
-    clear_oatmeal_env();
-}
-
-#[test]
-fn cli_browser_screenshot_exports_real_png() {
-    let _guard = lock_env();
-    clear_oatmeal_env();
-
-    let clean_home = create_clean_home();
-    let _home_guard = EnvVarGuard::set("HOME", clean_home.as_os_str());
-    let artifact_dir = reset_test_artifact_dir("cli_browser_screenshot_exports_real_png");
-    let working_dir = create_temp_test_dir("runtime-cwd-screenshot");
-    let source_dir = create_temp_test_dir("runtime-shot-source");
-    let sandbox_output = artifact_dir.join("sandbox-output");
-    let screenshot_path = source_dir.join("browser-shot.png");
-    let _cwd = DirGuard::enter(&working_dir);
-
-    let exe = resolve_wrapper_executable();
-    let browser_path = require_detected_browser();
-    let screenshot_command = format!(
-        "agent-browser open about:blank && agent-browser screenshot {}",
-        screenshot_path.display()
-    );
-
-    let output = Command::new(&exe)
-        .env("AGENT_BROWSER_EXECUTABLE_PATH", browser_path.as_os_str())
-        .args([
-            "--verbose",
-            "--sandbox-output",
-            sandbox_output.to_str().expect("sandbox output utf8"),
-            "--command",
-            &screenshot_command,
-        ])
-        .output()
-        .expect("run real screenshot command");
-
-    assert!(
-        output.status.success(),
-        "real screenshot command failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let exported = mirrored_export_path(&sandbox_output, &screenshot_path);
-    assert!(
-        exported.exists(),
-        "expected exported PNG at {}",
-        exported.display()
-    );
-    let bytes = std::fs::read(&exported).expect("read exported screenshot");
-    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
-    assert!(
-        !screenshot_path.exists(),
-        "real fs screenshot should be moved into sandbox output"
-    );
 
     clear_oatmeal_env();
 }

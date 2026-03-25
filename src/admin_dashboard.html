@@ -3,6 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" href="/logo.png" type="image/png" />
     <title>oatmeal launcher</title>
     <style>
       body {
@@ -12,6 +14,15 @@
       }
       h1 {
         margin-bottom: 8px;
+      }
+      .title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .title img {
+        width: 28px;
+        height: 28px;
       }
       p {
         color: #444;
@@ -46,7 +57,7 @@
     </style>
   </head>
   <body>
-    <h1>oatmeal launcher</h1>
+    <h1 class="title"><img src="/logo.png" alt="oatmeal logo" /> oatmeal launcher</h1>
     <p>Launch via <code>oatmeal://</code> from a webpage.</p>
 
     <div class="row">

@@ -1,0 +1,5 @@
+storybook-static/
+dist/
+node_modules/
+public/oatmeal
+public/oatmeal.exe

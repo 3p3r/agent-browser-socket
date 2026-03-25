@@ -9,7 +9,7 @@
     "format:rust": "cargo fmt",
     "format:js": "biome format --write",
     "build": "npm-run-all --parallel build:*",
-    "build:rust": "cargo build --release",
+    "build:native": "cargo build --release",
     "build:xwindows": "run-s build:xwindows:*",
     "build:xwindows:target": "rustup target add x86_64-pc-windows-msvc",
     "build:xwindows:xwin": "cargo install cargo-xwin --locked",

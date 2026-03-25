@@ -1,3 +1,5 @@
+#[path = "../src/app.rs"]
+mod app;
 #[path = "../src/bashkit_executor.rs"]
 mod bashkit_executor;
 #[path = "../src/browser_detection.rs"]
@@ -30,15 +32,16 @@ use tokio::sync::oneshot;
 
 fn touch_imported_symbols() {
     let config = configuration::AppConfig::default();
-    let _ = (&config.auth_url, &config.page_agent);
+    let _ = &config.page_agent;
     let _ = configuration::load_config;
     let _ = embedded_binary::clean_cached_binary;
-    let _ = mcp::run_mcp_stdio;
     let _ = runtime_shared::oatmeal_version;
     let _ = runtime_shared::oatmeal_version_text;
     let _ = runtime_shared::oatmeal_version_payload;
     let _ = runtime_shared::capture_system_screenshots;
-    let _ = command_runtime::CommandExecutionMode::Cli;
+    let _ = command_runtime::CommandExecutionMode::Mcp {
+        cache_root: std::path::PathBuf::new(),
+    };
     let _ = &server::URI_SCHEME;
     let _ = server::unregister_uri_scheme;
 }
@@ -64,9 +67,14 @@ async fn start_mcp_streamable_http_server() -> (String, oneshot::Sender<()>) {
     let base_url = format!("http://{}:{}", config.host, config.port);
 
     tokio::spawn(async move {
-        let _ = mcp::run_mcp_streamable_http(config, page_agent_config, async move {
-            let _ = shutdown_rx.await;
-        })
+        let _ = mcp::run_mcp_streamable_http(
+            config,
+            page_agent_config,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            None,
+        )
         .await;
     });
 

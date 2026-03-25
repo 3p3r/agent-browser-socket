@@ -4,6 +4,8 @@ use crate::configuration::PageAgentConfig;
 use crate::page_agent_runtime::{run_page_agent_injection, run_page_agent_prompt};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
+use tokio::time::timeout;
 
 pub struct PromptExecutionResult {
     pub stdout: String,
@@ -25,7 +27,6 @@ pub struct CommandExecutionResult {
 
 #[derive(Clone)]
 pub enum CommandExecutionMode {
-    Cli,
     Mcp { cache_root: std::path::PathBuf },
 }
 
@@ -40,14 +41,25 @@ pub async fn execute_prepared_command(
     command_env: Option<&HashMap<String, String>>,
     execution_mode: CommandExecutionMode,
 ) -> CommandExecutionResult {
-    let executor = match execution_mode {
-        CommandExecutionMode::Cli => BashkitExecutor::new(binary_path.to_path_buf()),
-        CommandExecutionMode::Mcp { cache_root } => BashkitExecutor::new_with_path_policy(
-            binary_path.to_path_buf(),
-            AgentBrowserPathPolicy::McpCacheRooted(cache_root),
-        ),
+    let CommandExecutionMode::Mcp { cache_root } = execution_mode;
+    let executor = BashkitExecutor::new_with_path_policy(
+        binary_path.to_path_buf(),
+        AgentBrowserPathPolicy::McpCacheRooted(cache_root),
+    );
+    const SHELL_TIMEOUT: Duration = Duration::from_secs(300);
+
+    let execution = match timeout(SHELL_TIMEOUT, executor.execute(&prepared, command_env)).await {
+        Ok(result) => result,
+        Err(_elapsed) => ExecutionResult {
+            stdout: String::new(),
+            stderr: format!(
+                "shell execution timed out after {} seconds",
+                SHELL_TIMEOUT.as_secs()
+            ),
+            exit_code: 124,
+            files: Vec::new(),
+        },
     };
-    let execution = executor.execute(&prepared, command_env).await;
 
     let page_agent_injection = if prepared.should_inject_page_agent && execution.exit_code == 0 {
         Some(run_page_agent_followups(binary_path, page_agent_config, &prepared, command_env).await)
@@ -67,20 +79,42 @@ async fn run_page_agent_followups(
     prepared: &PreparedCommand,
     command_env: Option<&HashMap<String, String>>,
 ) -> InjectionExecutionResult {
-    match run_page_agent_injection(binary_path, page_agent_config, command_env).await {
-        Ok(injection_exit) => {
+    const INJECTION_TIMEOUT: Duration = Duration::from_secs(120);
+
+    match timeout(
+        INJECTION_TIMEOUT,
+        run_page_agent_injection(binary_path, page_agent_config, command_env),
+    )
+    .await
+    {
+        Ok(Ok(injection_exit)) => {
             let prompt = if injection_exit == 0 {
                 if let Some(prompt) = prepared.agentic_prompt.as_ref() {
-                    match run_page_agent_prompt(binary_path, prompt, command_env).await {
-                        Ok(prompt_result) => Some(PromptExecutionResult {
+                    const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
+
+                    match timeout(
+                        PROMPT_TIMEOUT,
+                        run_page_agent_prompt(binary_path, prompt, command_env),
+                    )
+                    .await
+                    {
+                        Ok(Ok(prompt_result)) => Some(PromptExecutionResult {
                             stdout: prompt_result.stdout,
                             stderr: prompt_result.stderr,
                             exit_code: prompt_result.exit_code,
                         }),
-                        Err(error) => Some(PromptExecutionResult {
+                        Ok(Err(error)) => Some(PromptExecutionResult {
                             stdout: String::new(),
                             stderr: error,
                             exit_code: -1,
+                        }),
+                        Err(_elapsed) => Some(PromptExecutionResult {
+                            stdout: String::new(),
+                            stderr: format!(
+                                "page-agent prompt timed out after {} seconds",
+                                PROMPT_TIMEOUT.as_secs()
+                            ),
+                            exit_code: 124,
                         }),
                     }
                 } else {
@@ -97,10 +131,19 @@ async fn run_page_agent_followups(
                 prompt,
             }
         }
-        Err(error) => InjectionExecutionResult {
+        Ok(Err(error)) => InjectionExecutionResult {
             stdout: String::new(),
             stderr: error,
             exit_code: -1,
+            prompt: None,
+        },
+        Err(_elapsed) => InjectionExecutionResult {
+            stdout: String::new(),
+            stderr: format!(
+                "page-agent injection timed out after {} seconds",
+                INJECTION_TIMEOUT.as_secs()
+            ),
+            exit_code: 124,
             prompt: None,
         },
     }

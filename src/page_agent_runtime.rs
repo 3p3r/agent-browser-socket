@@ -20,7 +20,17 @@ pub async fn run_eval_script(
         .arg("eval")
         .arg(script)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .env("AGENT_BROWSER_SESSION", "safe");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    if let Some(binary_dir) = binary_path.parent() {
+        command.env("AGENT_BROWSER_HOME", binary_dir);
+    }
 
     if let Some(env) = command_env {
         command.envs(env);

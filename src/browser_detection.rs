@@ -16,13 +16,9 @@ pub fn find_chrome_browser() -> Option<PathBuf> {
         }
     }
 
-    for target in search_desktop_shortcuts() {
-        if target.exists() {
-            return Some(target);
-        }
-    }
-
-    None
+    search_desktop_shortcuts()
+        .into_iter()
+        .find(|target| target.exists())
 }
 
 fn is_chrome_like(exec_path: &str) -> bool {
@@ -299,11 +295,11 @@ fn extract_exec_path_from_desktop_content(content: &str) -> Option<PathBuf> {
 }
 
 fn parse_desktop_exec_value(value: &str) -> Option<PathBuf> {
-    let mut chars = value.chars().peekable();
+    let chars = value.chars().peekable();
     let mut token = String::new();
     let mut in_quotes = false;
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         if ch == '"' {
             in_quotes = !in_quotes;
             continue;

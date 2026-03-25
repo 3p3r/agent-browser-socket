@@ -1,3 +1,4 @@
+use crate::app::ensure_uri_scheme_registered;
 use crate::command_runtime::{
     execute_prepared_command, prepare_script_command, CommandExecutionMode,
 };
@@ -7,6 +8,7 @@ use crate::runtime_shared::{
     capture_system_screenshots, oatmeal_cache_dir_payload, oatmeal_version, oatmeal_version_payload,
 };
 use crate::sandbox_files::prepare_sandbox_files;
+use crate::server::{unregister_uri_scheme, URI_SCHEME};
 use axum::extract::Path as AxumPath;
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -20,13 +22,10 @@ use rmcp::{
     schemars,
     service::RequestContext,
     tool, tool_handler, tool_router,
-    transport::{
-        stdio,
-        streamable_http_server::{
-            session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-        },
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     },
-    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
+    ErrorData as McpError, RoleServer, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -34,11 +33,14 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::oneshot;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer, ExposeHeaders};
 use uuid::Uuid;
 
 const ADMIN_DASHBOARD_HTML: &str = include_str!("admin_dashboard.html");
+const LOGO_PNG: &[u8] = include_bytes!("../logo.png");
+const LOGO_ICO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/logo.ico"));
 include!(concat!(env!("OUT_DIR"), "/skills_manifest.rs"));
 
 type ResourceStore = Arc<RwLock<HashMap<String, ResourceEntry>>>;
@@ -96,6 +98,18 @@ pub struct DeleteAllResourcesInput {}
     description = "Return the cache directory used by oatmeal for embedded assets and MCP-side file outputs."
 )]
 pub struct CacheDirectoryInput {}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(
+    description = "Return runtime diagnostics for debugging browser selection and command routing issues."
+)]
+pub struct DiagnosticsInput {}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(description = "Register or unregister the oatmeal:// URI scheme handler.")]
+pub struct UriSchemeInput {
+    pub action: String,
+}
 
 #[derive(Clone)]
 pub struct SystemMcpServer {
@@ -181,6 +195,20 @@ impl SystemMcpServer {
     }
 
     #[tool(
+        name = "diagnostics",
+        description = "Return runtime diagnostics for debugging browser selection and command routing"
+    )]
+    async fn diagnostics(
+        &self,
+        Parameters(_input): Parameters<DiagnosticsInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let payload = crate::runtime_shared::diagnostics_payload();
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
         name = "screenshot_system",
         description = "Capture screenshots of all attached system monitors and expose them as resources"
     )]
@@ -217,6 +245,7 @@ impl SystemMcpServer {
         Ok(CallToolResult::success(contents))
     }
 
+    /// Timeouts: shell 5min, page-agent injection 2min, prompt 1min. Exit code 124 = timeout.
     #[tool(
         name = "shell_command",
         description = "Execute a sandboxed shell script with agent-browser available and return output plus generated resources"
@@ -225,8 +254,22 @@ impl SystemMcpServer {
         &self,
         Parameters(input): Parameters<ShellCommandInput>,
     ) -> Result<CallToolResult, McpError> {
+        tracing::debug!(
+            target: "oatmeal::mcp",
+            "shell_command called with: {:?}",
+            input.command
+        );
+
         let prepared = prepare_script_command(&input.command)
             .map_err(|msg| McpError::invalid_params(msg, None))?;
+
+        tracing::debug!(
+            target: "oatmeal::mcp",
+            "prepared script: {:?}, should_inject: {}, agentic_prompt: {:?}",
+            prepared.script,
+            prepared.should_inject_page_agent,
+            prepared.agentic_prompt
+        );
 
         let result = execute_prepared_command(
             &self.binary_path,
@@ -358,6 +401,43 @@ impl SystemMcpServer {
             serde_json::to_string(&response).unwrap_or_default(),
         )]))
     }
+
+    #[tool(
+        name = "uri_scheme",
+        description = "Register or unregister the oatmeal:// URI scheme handler"
+    )]
+    async fn uri_scheme(
+        &self,
+        Parameters(input): Parameters<UriSchemeInput>,
+    ) -> Result<CallToolResult, McpError> {
+        match input.action.as_str() {
+            "register" => match ensure_uri_scheme_registered() {
+                Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "registered {}:// URI scheme",
+                    URI_SCHEME.unsecure()
+                ))])),
+                Err(error) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "failed to register URI scheme: {error}"
+                ))])),
+            },
+            "unregister" => match unregister_uri_scheme() {
+                Ok(true) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "unregistered {}:// URI scheme",
+                    URI_SCHEME.unsecure()
+                ))])),
+                Ok(false) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "{}:// URI scheme already unregistered",
+                    URI_SCHEME.unsecure()
+                ))])),
+                Err(error) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "failed to unregister URI scheme: {error}"
+                ))])),
+            },
+            _ => Ok(CallToolResult::error(vec![Content::text(
+                "invalid action; expected 'register' or 'unregister'".to_string(),
+            )])),
+        }
+    }
 }
 
 #[tool_handler]
@@ -381,6 +461,7 @@ impl ServerHandler for SystemMcpServer {
             )
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -408,6 +489,7 @@ impl ServerHandler for SystemMcpServer {
         }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn read_resource(
         &self,
         request: ReadResourceRequestParams,
@@ -434,11 +516,23 @@ pub async fn run_mcp_streamable_http<F>(
     config: AppConfig,
     page_agent_config: PageAgentConfig,
     shutdown: F,
+    ready_tx: Option<oneshot::Sender<Result<crate::runtime_shared::StartupReady, String>>>,
 ) -> Result<i32, Box<dyn std::error::Error>>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
+    let binary_path = match resolve_binary_path(None) {
+        Ok(path) => path,
+        Err(error) => {
+            if let Some(tx) = ready_tx {
+                tx.send(Err(format!(
+                    "failed to resolve embedded browser binary: {error}"
+                )))
+                .ok();
+            }
+            return Err(Box::new(error));
+        }
+    };
     let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
     let streamable_http_service: StreamableHttpService<SystemMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
@@ -454,7 +548,11 @@ where
         );
 
     let app = Router::new()
+        .route("/health", get(health_handler).head(health_handler))
         .route("/", get(dashboard_handler))
+        .route("/logo.png", get(logo_png_handler))
+        .route("/logo.ico", get(logo_ico_handler))
+        .route("/favicon.ico", get(favicon_handler))
         .route("/skills", get(skills_index_handler))
         .route("/skills/", get(skills_index_handler))
         .route("/skills/{*path}", get(skills_file_handler))
@@ -470,7 +568,25 @@ where
         );
 
     let listener =
-        tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await?;
+        match tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                if let Some(tx) = ready_tx {
+                    tx.send(Err(format!("failed to bind MCP listener: {error}")))
+                        .ok();
+                }
+                return Err(Box::new(error));
+            }
+        };
+    let listen_addr = listener.local_addr()?;
+    tracing::info!("Listening on {}", listen_addr);
+    if let Some(tx) = ready_tx {
+        tx.send(Ok(crate::runtime_shared::StartupReady {
+            listen_addr: listen_addr.to_string(),
+            display_url: crate::runtime_shared::mcp_display_url(&config.host, config.port),
+        }))
+        .ok();
+    }
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown.await;
@@ -484,8 +600,24 @@ where
     Ok(0)
 }
 
+async fn health_handler() -> StatusCode {
+    StatusCode::OK
+}
+
 async fn dashboard_handler() -> Html<&'static str> {
     Html(ADMIN_DASHBOARD_HTML)
+}
+
+async fn logo_png_handler() -> Response {
+    ([(header::CONTENT_TYPE, "image/png")], LOGO_PNG).into_response()
+}
+
+async fn logo_ico_handler() -> Response {
+    ([(header::CONTENT_TYPE, "image/x-icon")], LOGO_ICO).into_response()
+}
+
+async fn favicon_handler() -> Response {
+    logo_ico_handler().await
 }
 
 async fn skills_index_handler() -> Html<String> {
@@ -525,6 +657,7 @@ async fn skills_file_handler(AxumPath(path): AxumPath<String>) -> Response {
 mod tests {
     use super::*;
     use crate::runtime_shared::oatmeal_cache_dir_text;
+    use axum::body::to_bytes;
 
     #[tokio::test]
     async fn command_preserves_paths_and_applies_ignore_filter() {
@@ -662,25 +795,40 @@ mod tests {
 
         assert!(text.contains(&oatmeal_cache_dir_text()), "text={text}");
     }
-}
 
-pub async fn run_mcp_stdio(
-    config: AppConfig,
-    page_agent_config: PageAgentConfig,
-) -> Result<i32, Box<dyn std::error::Error>> {
-    let binary_path = resolve_binary_path(config.browser_path.as_deref())?;
-    let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
-    let server = SystemMcpServer::new(binary_path, page_agent_config, resource_store);
+    #[tokio::test]
+    async fn logo_png_handler_returns_embedded_png() {
+        let response = logo_png_handler().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/png")
+        );
 
-    let transport = stdio();
-    let service = server
-        .serve(transport)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
-    service
-        .waiting()
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read png body");
+        assert_eq!(body.as_ref(), LOGO_PNG);
+    }
 
-    Ok(0)
+    #[tokio::test]
+    async fn favicon_handler_returns_embedded_ico() {
+        let response = favicon_handler().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/x-icon")
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read ico body");
+        assert_eq!(body.as_ref(), LOGO_ICO);
+    }
 }

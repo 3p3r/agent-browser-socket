@@ -20,7 +20,6 @@ pub struct BashkitExecutor {
 
 #[derive(Debug, Clone)]
 pub enum AgentBrowserPathPolicy {
-    HostNative,
     McpCacheRooted(PathBuf),
 }
 
@@ -56,6 +55,12 @@ struct AgentBrowserBuiltin {
 #[async_trait]
 impl Builtin for AgentBrowserBuiltin {
     async fn execute(&self, ctx: BuiltinContext<'_>) -> bashkit::Result<ExecResult> {
+        tracing::debug!(
+            target: "oatmeal::agent_browser",
+            "agent-browser builtin called with args: {:?}",
+            ctx.args
+        );
+
         let command_args = match rewrite_agent_browser_args(
             ctx.args,
             &self.path_policy,
@@ -64,6 +69,13 @@ impl Builtin for AgentBrowserBuiltin {
             Ok(args) => args,
             Err(result) => return Ok(result),
         };
+
+        tracing::debug!(
+            target: "oatmeal::agent_browser",
+            "executing agent-browser with args: {:?}",
+            command_args
+        );
+
         let stdout_path = capture_file_path("stdout");
         let stderr_path = capture_file_path("stderr");
         let stdout_file = match File::create(&stdout_path) {
@@ -86,10 +98,23 @@ impl Builtin for AgentBrowserBuiltin {
             }
         };
         let mut command = Command::new(&self.binary_path);
+        let (filtered_args, env_overrides) = extract_env_flags(&command_args);
         command
-            .args(&command_args)
+            .args(&filtered_args)
             .stdout(ProcessStdio::from(stdout_file))
-            .stderr(ProcessStdio::from(stderr_file));
+            .stderr(ProcessStdio::from(stderr_file))
+            .env("AGENT_BROWSER_SESSION", "safe");
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        for (key, value) in &env_overrides {
+            command.env(key, value);
+        }
+        if let Some(binary_dir) = self.binary_path.parent() {
+            command.env("AGENT_BROWSER_HOME", binary_dir);
+        }
 
         if ctx.stdin.is_some() {
             command.stdin(ProcessStdio::piped());
@@ -125,12 +150,22 @@ impl Builtin for AgentBrowserBuiltin {
         let _ = std::fs::remove_file(&stderr_path);
 
         match wait_result {
-            Ok(status) => Ok(ExecResult {
-                stdout,
-                stderr,
-                exit_code: status.code().unwrap_or(1),
-                ..Default::default()
-            }),
+            Ok(status) => {
+                let exit_code = status.code().unwrap_or(1);
+                tracing::debug!(
+                    target: "oatmeal::agent_browser",
+                    "agent-browser exited with code {}, stdout: {:?}, stderr: {:?}",
+                    exit_code,
+                    stdout,
+                    stderr
+                );
+                Ok(ExecResult {
+                    stdout,
+                    stderr,
+                    exit_code,
+                    ..Default::default()
+                })
+            }
             Err(error) => Ok(ExecResult::err(
                 format!("agent-browser: failed to wait for process: {error}\n"),
                 1,
@@ -159,8 +194,12 @@ fn read_capture_file(path: &Path) -> String {
 }
 
 impl BashkitExecutor {
+    #[cfg(test)]
     pub fn new(binary_path: PathBuf) -> Self {
-        Self::new_with_path_policy(binary_path, AgentBrowserPathPolicy::HostNative)
+        Self::new_with_path_policy(
+            binary_path,
+            AgentBrowserPathPolicy::McpCacheRooted(std::env::temp_dir()),
+        )
     }
 
     pub fn new_with_path_policy(binary_path: PathBuf, path_policy: AgentBrowserPathPolicy) -> Self {
@@ -182,8 +221,8 @@ impl BashkitExecutor {
         let pre_existing: HashSet<PathBuf> = command
             .referenced_paths
             .iter()
-            .cloned()
             .filter(|p| p.exists())
+            .cloned()
             .collect();
 
         let mut builder = Bash::builder().python().builtin(
@@ -211,8 +250,20 @@ impl BashkitExecutor {
         }
 
         let mut bash = builder.build();
+        tracing::debug!(
+            target: "oatmeal::bashkit",
+            "executing bashkit script: {:?}",
+            command.script
+        );
         match bash.exec(&command.script).await {
             Ok(result) => {
+                tracing::debug!(
+                    target: "oatmeal::bashkit",
+                    "bashkit result: exit_code={}, stdout={:?}, stderr={:?}",
+                    result.exit_code,
+                    result.stdout,
+                    result.stderr
+                );
                 let mut files = collect_new_files(sandbox_fs.as_ref(), &baseline_files).await;
 
                 let output_paths: HashSet<PathBuf> =
@@ -251,18 +302,73 @@ impl BashkitExecutor {
     }
 }
 
+/// Extract flags that have env-var equivalents from args and return them as
+/// environment variable overrides. Defaults to headed mode; pass `--headless`
+/// to opt out.
+fn extract_env_flags(args: &[String]) -> (Vec<String>, Vec<(&'static str, String)>) {
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut env = Vec::new();
+    let mut headless = false;
+    let mut skip_next = false;
+
+    for (i, arg) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        match arg.as_str() {
+            "--headed" => {
+                let next = args.get(i + 1).map(|s| s.as_str());
+                if next == Some("true") || next == Some("false") {
+                    skip_next = true;
+                }
+            }
+            "--headless" => {
+                headless = true;
+            }
+            _ => filtered.push(arg.clone()),
+        }
+    }
+
+    env.push((
+        "AGENT_BROWSER_HEADED",
+        if headless { "false" } else { "true" }.to_string(),
+    ));
+
+    (filtered, env)
+}
+
 fn rewrite_agent_browser_args(
     args: &[String],
     path_policy: &AgentBrowserPathPolicy,
     output_path_hints: &Arc<Mutex<Vec<PathBuf>>>,
 ) -> Result<Vec<String>, ExecResult> {
     let Some(output_index) = output_arg_index(args) else {
+        tracing::debug!(
+            target: "oatmeal::agent_browser",
+            "no output path detected in args: {:?}",
+            args
+        );
         return Ok(args.to_vec());
     };
+
+    tracing::debug!(
+        target: "oatmeal::agent_browser",
+        "detected output path at index {}: {:?}",
+        output_index,
+        args[output_index]
+    );
 
     let Some(rewritten_path) = rewrite_output_path(&args[output_index], path_policy) else {
         return Ok(args.to_vec());
     };
+
+    tracing::debug!(
+        target: "oatmeal::agent_browser",
+        "rewriting output path from {:?} to {:?}",
+        args[output_index],
+        rewritten_path.display()
+    );
 
     if let Some(parent) = rewritten_path.parent() {
         if let Err(error) = std::fs::create_dir_all(parent) {
@@ -328,12 +434,8 @@ fn looks_like_output_path(arg: &str) -> bool {
 }
 
 fn rewrite_output_path(arg: &str, path_policy: &AgentBrowserPathPolicy) -> Option<PathBuf> {
-    match path_policy {
-        AgentBrowserPathPolicy::HostNative => None,
-        AgentBrowserPathPolicy::McpCacheRooted(cache_root) => {
-            Some(cache_root.join(path_to_cache_relative(arg)))
-        }
-    }
+    let AgentBrowserPathPolicy::McpCacheRooted(cache_root) = path_policy;
+    Some(cache_root.join(path_to_cache_relative(arg)))
 }
 
 fn path_to_cache_relative(raw: &str) -> PathBuf {
@@ -598,7 +700,11 @@ mod tests {
         let result = executor.execute(&command, None).await;
 
         assert_eq!(result.exit_code, 0);
-        assert_eq!(result.stdout, "screenshot /tmp/out.png\n");
+        let expected_path = std::env::temp_dir().join("tmp/out.png");
+        assert_eq!(
+            result.stdout,
+            format!("screenshot {}\n", expected_path.display())
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }

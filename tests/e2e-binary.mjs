@@ -63,7 +63,7 @@ console.log(`\nTesting binary: ${binaryPath}\n`);
 
 await test("--version prints wrapper version", ["--version"], ({ code, stdout }) => {
   assert(code === 0, `expected exit code 0, got ${code}`);
-  assert(stdout.includes("oatmeal"), `stdout should contain "oatmeal", got: ${stdout.trim()}`);
+  assert(stdout.toLowerCase().includes("oatmeal"), `stdout should contain "oatmeal", got: ${stdout.trim()}`);
 });
 
 await test(
