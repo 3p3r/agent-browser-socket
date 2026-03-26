@@ -19,6 +19,7 @@
     "predev:link": "shx ln -sf ../../target/release/oatmeal public/oatmeal"
   },
   "dependencies": {
+    "custom-protocol-check": "^1.4.0",
     "modern-normalize": "^3.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

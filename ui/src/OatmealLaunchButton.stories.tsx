@@ -5,7 +5,15 @@ import { defaultReleaseBaseUrl } from "./platformDetection";
 const meta: Meta<typeof OatmealLaunchButton> = {
   title: "Oatmeal/LaunchButton",
   component: OatmealLaunchButton,
-  parameters: { layout: "centered" },
+  parameters: {
+    layout: "centered",
+    docs: {
+      description: {
+        component:
+          "Launch flow is protocol-first: the button attempts `oatmeal://open?host=...&port=...` and falls back to the platform download URL when the protocol handler is unavailable.",
+      },
+    },
+  },
   tags: ["autodocs"],
 };
 
@@ -46,6 +54,24 @@ export const WithPlatformDetection: Story = {
   name: "Platform Detection (Auto)",
   args: {
     downloadUrl: defaultReleaseBaseUrl(),
+  },
+};
+
+export const ProtocolFirstLaunch: Story = {
+  name: "Protocol-First Launch",
+  args: {
+    host: "127.0.0.1",
+    port: 9607,
+    downloadUrl: defaultReleaseBaseUrl(),
+    children: "Open Oatmeal",
+  },
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Click attempts the `oatmeal://` protocol first. If unavailable or unsupported, it opens the download URL in a new tab.",
+      },
+    },
   },
 };
 

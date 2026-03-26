@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import React from "react";
+import customProtocolCheck from "custom-protocol-check";
 import "./OatmealLaunchButton.css";
 import { defaultReleaseBaseUrl, detectPlatform, getReleasesPageUrl } from "./platformDetection";
 import type { PlatformInfo } from "./platformDetection";
@@ -141,11 +142,50 @@ export class OatmealLaunchButton extends React.Component<OatmealLaunchButtonProp
     }, this.props.pollIntervalMs ?? OatmealLaunchButton.defaultProps.pollIntervalMs);
   };
 
-  private launch = () => {
+  private buildProtocolLaunchUri = (): string => {
+    const host = this.props.host ?? OatmealLaunchButton.defaultProps.host;
+    const port = this.props.port ?? OatmealLaunchButton.defaultProps.port;
+    const hostParam = encodeURIComponent(host ?? "127.0.0.1");
+    const portParam = encodeURIComponent(String(port ?? 9607));
+    return `oatmeal://open?host=${hostParam}&port=${portParam}`;
+  };
+
+  private tryProtocolLaunchWithFallback = (downloadUrl: string) => {
+    const protocolUri = this.buildProtocolLaunchUri();
+    let fallbackTriggered = false;
+
+    const openDownloadIfNeeded = async () => {
+      if (fallbackTriggered) return;
+      fallbackTriggered = true;
+      if (await this.probeRunning()) return;
+      window.open(downloadUrl, "_blank", "noopener,noreferrer");
+    };
+
+    try {
+      customProtocolCheck(
+        protocolUri,
+        () => {
+          void openDownloadIfNeeded();
+        },
+        () => {},
+        1600,
+        () => {
+          void openDownloadIfNeeded();
+        },
+      );
+    } catch {
+      void openDownloadIfNeeded();
+    }
+  };
+
+  private launch = (downloadUrl?: string) => {
     this.clearTimers();
     this.setState({ error: "" });
     this.updatePhase("waiting");
     localStorage.setItem(this.props.storageKey ?? OatmealLaunchButton.defaultProps.storageKey, "1");
+    if (downloadUrl) {
+      this.tryProtocolLaunchWithFallback(downloadUrl);
+    }
     this.pollFor(
       this.props.connectTimeoutMs ?? OatmealLaunchButton.defaultProps.connectTimeoutMs,
       () => this.updatePhase("connected"),
@@ -195,8 +235,7 @@ export class OatmealLaunchButton extends React.Component<OatmealLaunchButtonProp
       const handleClick = platform.downloadUrl
         ? (e: React.MouseEvent) => {
             e.preventDefault();
-            window.open(href, "_blank", "noopener,noreferrer");
-            this.launch();
+            this.launch(href);
           }
         : undefined;
 

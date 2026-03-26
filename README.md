@@ -15,6 +15,8 @@ Oatmeal is a single binary tray application that extends your web agent's capabi
 
 ## Quick Start
 
+Oatmeal is meant to be used with its complementary barebones React component: [Storybook here](https://3p3r.github.io/oatmeal/storybook/). Build on top of this foundation to create your own custom agent interfaces, or use the MCP server directly in your agents without a UI.
+
 Download the latest binary from [releases](https://github.com/3p3r/oatmeal/releases):
 
 - Linux: `oatmeal-linux`
