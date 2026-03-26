@@ -857,6 +857,8 @@ mod tray_icon_tests {
                 "Listening: 127.0.0.1:9607",
                 "Open Cache Dir",
                 "Clean Cache",
+                "Register URI Scheme",
+                "Unregister URI Scheme",
                 "Shutdown"
             ]
         );
