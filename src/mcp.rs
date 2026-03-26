@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer, ExposeHeaders};
 use uuid::Uuid;
 
@@ -117,6 +118,8 @@ pub struct SystemMcpServer {
     page_agent_config: PageAgentConfig,
     resource_store: ResourceStore,
     tool_router: ToolRouter<Self>,
+    shutdown_signal: Arc<tokio::sync::Notify>,
+    session_cancellation: CancellationToken,
 }
 
 #[tool_router]
@@ -150,12 +153,16 @@ impl SystemMcpServer {
         binary_path: PathBuf,
         page_agent_config: PageAgentConfig,
         resource_store: ResourceStore,
+        shutdown_signal: Arc<tokio::sync::Notify>,
+        session_cancellation: CancellationToken,
     ) -> Self {
         Self {
             binary_path,
             page_agent_config,
             resource_store,
             tool_router: Self::tool_router(),
+            shutdown_signal,
+            session_cancellation,
         }
     }
 
@@ -390,13 +397,8 @@ impl SystemMcpServer {
     )]
     async fn shutdown(&self) -> Result<CallToolResult, McpError> {
         let response = serde_json::json!({"status": "closing"});
-
-        // Spawn a task to exit after a brief delay to allow the response to be sent
-        tokio::spawn(async {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            std::process::exit(0);
-        });
-
+        self.session_cancellation.cancel();
+        self.shutdown_signal.notify_waiters();
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&response).unwrap_or_default(),
         )]))
@@ -534,6 +536,10 @@ where
         }
     };
     let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
+    let mcp_shutdown_signal = Arc::new(tokio::sync::Notify::new());
+    let mcp_shutdown_for_graceful = Arc::clone(&mcp_shutdown_signal);
+    let session_cancel_token = CancellationToken::new();
+    let session_cancel_for_factory = session_cancel_token.clone();
     let streamable_http_service: StreamableHttpService<SystemMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -541,10 +547,15 @@ where
                     binary_path.clone(),
                     page_agent_config.clone(),
                     resource_store.clone(),
+                    mcp_shutdown_signal.clone(),
+                    session_cancel_for_factory.clone(),
                 ))
             },
             Default::default(),
-            StreamableHttpServerConfig::default(),
+            StreamableHttpServerConfig {
+                cancellation_token: session_cancel_token,
+                ..StreamableHttpServerConfig::default()
+            },
         );
 
     let app = Router::new()
@@ -567,8 +578,17 @@ where
                 )])),
         );
 
-    let listener =
-        match tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port)).await {
+    let listener = {
+        let socket = tokio::net::TcpSocket::new_v4()
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+        #[cfg(not(windows))]
+        socket
+            .set_reuseaddr(true)
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+        let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port)
+            .parse()
+            .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+        match socket.bind(addr).and_then(|()| socket.listen(1024)) {
             Ok(listener) => listener,
             Err(error) => {
                 if let Some(tx) = ready_tx {
@@ -577,7 +597,8 @@ where
                 }
                 return Err(Box::new(error));
             }
-        };
+        }
+    };
     let listen_addr = listener.local_addr()?;
     tracing::info!("Listening on {}", listen_addr);
     if let Some(tx) = ready_tx {
@@ -589,11 +610,10 @@ where
     }
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            shutdown.await;
-            tokio::spawn(async {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                std::process::exit(0);
-            });
+            tokio::select! {
+                _ = shutdown => {}
+                _ = mcp_shutdown_for_graceful.notified() => {}
+            }
         })
         .await?;
 
@@ -667,6 +687,8 @@ mod tests {
             binary_path,
             PageAgentConfig::default(),
             resource_store.clone(),
+            Arc::new(tokio::sync::Notify::new()),
+            CancellationToken::new(),
         );
 
         let unique = SystemTime::now()
@@ -732,6 +754,8 @@ mod tests {
             binary_path,
             PageAgentConfig::default(),
             resource_store.clone(),
+            Arc::new(tokio::sync::Notify::new()),
+            CancellationToken::new(),
         );
 
         let unique = SystemTime::now()
@@ -780,7 +804,13 @@ mod tests {
     async fn cache_directory_returns_cache_root() {
         let binary_path = resolve_binary_path(None).expect("resolve binary path");
         let resource_store: ResourceStore = Arc::new(RwLock::new(HashMap::new()));
-        let server = SystemMcpServer::new(binary_path, PageAgentConfig::default(), resource_store);
+        let server = SystemMcpServer::new(
+            binary_path,
+            PageAgentConfig::default(),
+            resource_store,
+            Arc::new(tokio::sync::Notify::new()),
+            CancellationToken::new(),
+        );
 
         let result = server
             .cache_directory(Parameters(CacheDirectoryInput {}))

@@ -64,5 +64,5 @@ export function getReleasesPageUrl(releaseBaseUrl: string): string {
 }
 
 export function defaultReleaseBaseUrl(): string {
-  return "https://github.com/3p3r/oatmeal/releases/download/rc5";
+  return "https://github.com/3p3r/oatmeal/releases/download/rc6";
 }

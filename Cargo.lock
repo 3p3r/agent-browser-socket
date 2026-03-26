@@ -2889,6 +2889,7 @@ dependencies = [
  "sysuri",
  "tar",
  "tokio",
+ "tokio-util",
  "tower-http",
  "tracing",
  "tray-icon",
