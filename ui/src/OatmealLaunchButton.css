@@ -71,3 +71,34 @@
   border-radius: 50%;
   animation: oatmeal-rotate 0.65s linear infinite;
 }
+
+/* ── Notice (mobile / tablet) ────────────────────────────────────────────────────── */
+.oatmeal-notice {
+  --oatmeal-accent: #4a7af5;
+  --oatmeal-font: inherit;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  font: 400 14px / 1.4 var(--oatmeal-font);
+}
+
+.oatmeal-notice strong {
+  font-weight: 600;
+}
+
+.oatmeal-notice a {
+  color: var(--oatmeal-accent);
+  text-decoration: underline;
+}
+
+/* ── All-downloads link ──────────────────────────────────────────────────────── */
+.oatmeal-downloads-link {
+  --oatmeal-accent: #4a7af5;
+  --oatmeal-font: inherit;
+  display: block;
+  margin-top: 8px;
+  font: 400 12px / 1 var(--oatmeal-font);
+  color: var(--oatmeal-accent);
+  text-decoration: underline;
+}

@@ -1,14 +1,15 @@
 /// <reference types="vite/client" />
 import React from "react";
 import "./OatmealLaunchButton.css";
+import { defaultReleaseBaseUrl, detectPlatform, getReleasesPageUrl } from "./platformDetection";
+import type { PlatformInfo } from "./platformDetection";
 
-function getDownloadUrl(override?: string): string | null {
+function getReleaseBaseUrl(override?: string): string {
   if (override) return override;
-  if (import.meta.env.DEV) return "/oatmeal";
-  return (import.meta.env.VITE_OATMEAL_DOWNLOAD_URL as string | undefined) ?? null;
+  return (import.meta.env.VITE_OATMEAL_DOWNLOAD_URL as string | undefined) ?? defaultReleaseBaseUrl();
 }
 
-export type Phase = "idle" | "waiting" | "downloading" | "run_it" | "connected" | "error";
+export type Phase = "idle" | "waiting" | "run_it" | "connected" | "error";
 
 export interface OatmealLaunchButtonProps {
   downloadUrl?: string;
@@ -29,7 +30,6 @@ export interface OatmealLaunchButtonProps {
 
 interface OatmealLaunchButtonState {
   phase: Phase;
-  progress: number;
   error: string;
 }
 
@@ -52,7 +52,6 @@ export class OatmealLaunchButton extends React.Component<OatmealLaunchButtonProp
     super(props);
     this.state = {
       phase: "idle",
-      progress: 0,
       error: "",
     };
   }
@@ -142,85 +141,25 @@ export class OatmealLaunchButton extends React.Component<OatmealLaunchButtonProp
     }, this.props.pollIntervalMs ?? OatmealLaunchButton.defaultProps.pollIntervalMs);
   };
 
-  private download = async (url: string) => {
-    this.updatePhase("downloading");
-    this.setState({ progress: 0 });
-    this.props.onDownloadProgress?.(0);
-    try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const total = Number(res.headers.get("content-length") || 0);
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error("Response body is null");
-      const chunks: Uint8Array[] = [];
-      let got = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        got += value.length;
-        if (total > 0) {
-          const pct = Math.round((got / total) * 100);
-          this.setState({ progress: pct });
-          this.props.onDownloadProgress?.(pct);
-        }
-      }
-      this.setState({ progress: 100 });
-      this.props.onDownloadProgress?.(100);
-      const blob = new Blob(chunks as BlobPart[], { type: "application/octet-stream" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "oatmeal";
-      a.click();
-      URL.revokeObjectURL(a.href);
-      localStorage.setItem(this.props.storageKey ?? OatmealLaunchButton.defaultProps.storageKey, "1");
-
-      this.updatePhase("run_it");
-      this.pollFor(
-        this.props.postDownloadTimeoutMs ?? OatmealLaunchButton.defaultProps.postDownloadTimeoutMs,
-        () => this.updatePhase("connected"),
-        () => {
-          const msg = "Timed out waiting for Oatmeal to start. Run the downloaded binary and try again.";
-          this.reportError(msg);
-          this.updatePhase("error");
-        },
-      );
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Download failed";
-      this.reportError(msg);
-      this.updatePhase("error");
-    }
-  };
-
   private launch = () => {
     this.clearTimers();
     this.setState({ error: "" });
     this.updatePhase("waiting");
+    localStorage.setItem(this.props.storageKey ?? OatmealLaunchButton.defaultProps.storageKey, "1");
     this.pollFor(
       this.props.connectTimeoutMs ?? OatmealLaunchButton.defaultProps.connectTimeoutMs,
       () => this.updatePhase("connected"),
       () => {
-        if (localStorage.getItem(this.props.storageKey ?? OatmealLaunchButton.defaultProps.storageKey)) {
-          this.updatePhase("run_it");
-          this.pollFor(
-            this.props.postDownloadTimeoutMs ?? OatmealLaunchButton.defaultProps.postDownloadTimeoutMs,
-            () => this.updatePhase("connected"),
-            () => {
-              const msg = "Timed out waiting for Oatmeal to start. Run the binary and try again.";
-              this.reportError(msg);
-              this.updatePhase("error");
-            },
-          );
-          return;
-        }
-        const url = getDownloadUrl(this.props.downloadUrl);
-        if (!url) {
-          const msg = "Download URL not configured. Set VITE_OATMEAL_DOWNLOAD_URL.";
-          this.reportError(msg);
-          this.updatePhase("error");
-          return;
-        }
-        void this.download(url);
+        this.updatePhase("run_it");
+        this.pollFor(
+          this.props.postDownloadTimeoutMs ?? OatmealLaunchButton.defaultProps.postDownloadTimeoutMs,
+          () => this.updatePhase("connected"),
+          () => {
+            const msg = "Timed out waiting for Oatmeal to start. Run the downloaded binary and try again.";
+            this.reportError(msg);
+            this.updatePhase("error");
+          },
+        );
       },
     );
   };
@@ -228,21 +167,48 @@ export class OatmealLaunchButton extends React.Component<OatmealLaunchButtonProp
   private retry = () => {
     this.clearTimers();
     this.updatePhase("idle");
-    this.setState({ error: "", progress: 0 });
+    this.setState({ error: "" });
   };
 
   render() {
-    const { phase, progress, error } = this.state;
+    const { phase, error } = this.state;
     const { children } = this.props;
+    const releaseBaseUrl = getReleaseBaseUrl(this.props.downloadUrl);
 
     if (phase === "idle") {
-      const host = this.props.host ?? OatmealLaunchButton.defaultProps.host;
-      const port = this.props.port ?? OatmealLaunchButton.defaultProps.port;
-      const oatmealUri = `oatmeal://open?host=${encodeURIComponent(host)}&port=${encodeURIComponent(port)}`;
+      const platform: PlatformInfo = detectPlatform(releaseBaseUrl);
+      const releasesPageUrl = getReleasesPageUrl(releaseBaseUrl);
+
+      if (platform.isMobile) {
+        return (
+          <span className="oatmeal-notice">
+            <strong>Oatmeal is a desktop application</strong>
+            <a href={releasesPageUrl} target="_blank" rel="noopener noreferrer">
+              View releases on GitHub
+            </a>
+          </span>
+        );
+      }
+
+      const href = platform.downloadUrl ?? releasesPageUrl;
+      const label = children ?? platform.buttonLabel;
+      const handleClick = platform.downloadUrl
+        ? (e: React.MouseEvent) => {
+            e.preventDefault();
+            window.open(href, "_blank", "noopener,noreferrer");
+            this.launch();
+          }
+        : undefined;
+
       return (
-        <a href={oatmealUri} className="oatmeal-btn" onClick={this.launch}>
-          {children ?? "Launch Oatmeal"}
-        </a>
+        <React.Fragment>
+          <a href={href} className="oatmeal-btn" onClick={handleClick}>
+            {label}
+          </a>
+          <a href={releasesPageUrl} className="oatmeal-downloads-link" target="_blank" rel="noopener noreferrer">
+            View all downloads
+          </a>
+        </React.Fragment>
       );
     }
 
@@ -251,15 +217,6 @@ export class OatmealLaunchButton extends React.Component<OatmealLaunchButtonProp
         <button type="button" className="oatmeal-btn oatmeal-btn--loading" disabled>
           <span className="oatmeal-spinner" />
           Connecting…
-        </button>
-      );
-    }
-
-    if (phase === "downloading") {
-      return (
-        <button type="button" className="oatmeal-btn oatmeal-btn--loading" disabled>
-          <span className="oatmeal-spinner" />
-          Downloading {progress}%
         </button>
       );
     }

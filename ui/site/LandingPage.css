@@ -1,0 +1,157 @@
+@import "modern-normalize";
+
+html {
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: inherit;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+.oatmeal-landing {
+  --oatmeal-bg: #0d1117;
+  --oatmeal-surface: #161b22;
+  --oatmeal-text: #e6edf3;
+  --oatmeal-text-muted: #8b949e;
+  --oatmeal-accent: #4a7af5;
+  --oatmeal-accent-hover: #3a6ae5;
+  --oatmeal-border: #30363d;
+  --oatmeal-radius: 8px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --space-5: 32px;
+  --space-6: 48px;
+
+  background: var(--oatmeal-bg);
+  color: var(--oatmeal-text);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.5;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6) var(--space-5);
+}
+
+.oatmeal-container {
+  max-width: 640px;
+  width: 100%;
+  text-align: center;
+}
+
+.oatmeal-logo {
+  max-height: 64px;
+  margin-bottom: var(--space-3);
+}
+
+.oatmeal-title {
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0 0 var(--space-2) 0;
+}
+
+.oatmeal-tagline {
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--oatmeal-text-muted);
+  max-width: 480px;
+  margin: 0 auto var(--space-4) auto;
+}
+
+.oatmeal-download {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: var(--space-4);
+}
+
+.oatmeal-features {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  text-align: left;
+}
+
+.oatmeal-feature {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--oatmeal-surface);
+  border: 1px solid var(--oatmeal-border);
+  border-radius: var(--oatmeal-radius);
+}
+
+.oatmeal-feature-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+  width: 32px;
+  text-align: center;
+}
+
+.oatmeal-feature-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--oatmeal-text);
+}
+
+.oatmeal-feature-desc {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--oatmeal-text-muted);
+}
+
+.oatmeal-footer {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--oatmeal-border);
+  text-align: center;
+}
+
+.oatmeal-footer a {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--oatmeal-text-muted);
+  text-decoration: none;
+}
+
+.oatmeal-footer a:hover {
+  text-decoration: underline;
+}
+
+.oatmeal-footer-sep {
+  color: var(--oatmeal-text-muted);
+  margin: 0 var(--space-2);
+}
+
+@media (max-width: 767px) {
+  .oatmeal-landing {
+    padding: var(--space-4) var(--space-3);
+  }
+
+  .oatmeal-logo {
+    max-height: 48px;
+  }
+
+  .oatmeal-title {
+    font-size: 32px;
+  }
+
+  .oatmeal-feature {
+    padding: var(--space-2);
+  }
+}
