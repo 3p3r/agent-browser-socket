@@ -2,6 +2,7 @@ use crate::configuration::PageAgentConfig;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 pub struct EvalOutput {
@@ -18,7 +19,8 @@ pub async fn run_eval_script(
     let mut command = Command::new(binary_path);
     command
         .arg("eval")
-        .arg(script)
+        .arg("--stdin")
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("AGENT_BROWSER_SESSION", "safe");
@@ -36,10 +38,25 @@ pub async fn run_eval_script(
         command.envs(env);
     }
 
-    let output = command
-        .output()
-        .await
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("failed to spawn page-agent eval: {error}"))?;
+
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "failed to open stdin pipe for page-agent eval".to_string())?;
+        stdin
+            .write_all(script.as_bytes())
+            .await
+            .map_err(|error| format!("failed to write eval script to stdin: {error}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|error| format!("failed to wait for page-agent eval: {error}"))?;
 
     Ok(EvalOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -54,52 +71,47 @@ pub async fn run_page_agent_injection(
     command_env: Option<&HashMap<String, String>>,
 ) -> Result<i32, String> {
     let bundle = crate::server::render_page_agent_bundle(page_agent_config);
-    let max_chunk_bytes = 20_000;
+    let serialized_bundle = serde_json::to_string(&bundle).unwrap_or_else(|_| "\"\"".to_string());
 
-    let init = run_eval_script(
-        binary_path,
-        "window.__oatmealPageAgentChunks = [];".to_string(),
-        command_env,
-    )
-    .await?;
-    if init.exit_code != 0 {
-        return Ok(init.exit_code);
-    }
-
-    let mut chunk_start = 0;
-    while chunk_start < bundle.len() {
-        let mut chunk_end = (chunk_start + max_chunk_bytes).min(bundle.len());
-        while chunk_end > chunk_start && !bundle.is_char_boundary(chunk_end) {
-            chunk_end -= 1;
-        }
-
-        if chunk_end == chunk_start {
-            break;
-        }
-
-        let chunk = &bundle[chunk_start..chunk_end];
-        let serialized_chunk = serde_json::to_string(chunk).unwrap_or_else(|_| "\"\"".to_string());
-        let append_script = format!("window.__oatmealPageAgentChunks.push({serialized_chunk});");
-
-        let append = run_eval_script(binary_path, append_script, command_env).await?;
-        if append.exit_code != 0 {
-            return Ok(append.exit_code);
-        }
-
-        chunk_start = chunk_end;
-    }
-
-    let finalize_script = r#"(() => {
+    let injection_script = format!(
+        r#"(async () => {{
     if (window.PageAgent) return 'already_loaded';
-    const source = (window.__oatmealPageAgentChunks || []).join('');
-    delete window.__oatmealPageAgentChunks;
-    (0, eval)(source);
+
+    const deadline = Date.now() + 10000;
+    while (document.readyState === 'loading') {{
+        if (Date.now() > deadline) throw new Error('page did not reach interactive within 10s');
+        await new Promise(r => setTimeout(r, 100));
+    }}
+
+    const url = location.href;
+    (0, eval)({serialized_bundle});
+
+    await new Promise(r => setTimeout(r, 0));
+    if (location.href !== url) throw new Error('page navigated during injection');
     if (!window.PageAgent) throw new Error('PageAgent not found on window after eval');
     return 'loaded';
-})()"#;
+}})()"#
+    );
 
-    let finalize = run_eval_script(binary_path, finalize_script.to_string(), command_env).await?;
-    Ok(finalize.exit_code)
+    const MAX_ATTEMPTS: u32 = 3;
+    const RETRY_DELAY_MS: u64 = 500;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let result = run_eval_script(binary_path, injection_script.clone(), command_env).await?;
+
+        if result.exit_code == 0 {
+            return Ok(0);
+        }
+
+        if attempt < MAX_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                RETRY_DELAY_MS * attempt as u64,
+            ))
+            .await;
+        }
+    }
+
+    Ok(1)
 }
 
 pub async fn run_page_agent_prompt(
